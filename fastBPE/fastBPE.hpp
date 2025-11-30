@@ -22,6 +22,12 @@
 #include <omp.h>
 #include <chrono>
 #include <cmath>
+#ifdef CONFIG_OMP_TBB
+#include <tbb/concurrent_unordered_map.h>
+#define _hash_map tbb::concurrent_unordered_map
+#else
+#define _hash_map unordered_map
+#endif
 
 
 namespace fastBPE {
@@ -92,7 +98,7 @@ size_t readText(const char *fp, unordered_map<string, uint32_t> &word_count) {
 }
 
 std::pair<size_t, uint64_t> output_or_count(
-  unordered_map<string, string> &bpe, size_t size, char *f, char *fo
+  _hash_map<string, string> &bpe, size_t size, char *f, char *fo
 ) {
   string cur_word;
   size_t charOut = 0;
@@ -125,7 +131,7 @@ std::pair<size_t, uint64_t> output_or_count(
 }
 
 void outputText(const char *fpo, const char *fp,
-                unordered_map<string, string> &bpe) {
+                _hash_map<string, string> &bpe) {
 
   int fd = safeOpen(fp, O_RDONLY);
   auto fdOut = safeOpen(fpo, O_RDWR | O_CREAT | O_TRUNC, 0666);
@@ -806,7 +812,6 @@ void applybpe(const char *outputFile, const char *inputFile,
     }
   }
 #else
-#if defined(CONFIG_OMP_CRITICAL)
   int nr_threads;
   #pragma omp parallel
   {
@@ -815,8 +820,8 @@ void applybpe(const char *outputFile, const char *inputFile,
     }
   }
 
+#if defined(CONFIG_OMP_CRITICAL)
   cout << "omp critical region, number of threads = " << nr_threads << endl;
-  unordered_map<string, string> bpe[nr_threads];
   unordered_map<string, string> final_bpe;
 
   #pragma omp parallel for
@@ -829,14 +834,6 @@ void applybpe(const char *outputFile, const char *inputFile,
     }
   }
 #elif defined(CONFIG_OMP_SINGLE_THREADED_MERGE)
-  int nr_threads;
-  #pragma omp parallel
-  {
-    if (omp_get_thread_num() == 0) {
-      nr_threads = omp_get_num_threads();
-    }
-  }
-
   cout << "omp single thread merge, number of threads = " << nr_threads << endl;
   unordered_map<string, string> bpe[nr_threads];
 
@@ -852,6 +849,16 @@ void applybpe(const char *outputFile, const char *inputFile,
     for (auto x : bpe[i]) {
       final_bpe[x.first] = x.second;
     }
+  }
+#elif defined(CONFIG_OMP_TBB)
+  cout << "omp+tbb, number of threads = " << nr_threads << endl;
+  tbb::concurrent_unordered_map<string, string> final_bpe;
+
+  #pragma omp parallel for
+  for (size_t w = 0; w < bpeTokVec.size(); w++) {
+    auto &x = bpeTokVec[w];
+    auto str = process_bpe(x.second, codes, reversed_codes, vocab);
+    final_bpe[x.first] = str;
   }
 #else
 #error "Define a parallel method"
