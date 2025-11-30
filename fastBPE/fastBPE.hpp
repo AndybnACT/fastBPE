@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <omp.h>
 #include <chrono>
 #include <cmath>
 
@@ -780,6 +781,9 @@ void applybpe(const char *outputFile, const char *inputFile,
   }
 
   // apply BPE codes to each word
+
+#ifndef CONFIG_OMP
+  cout << "Spawning " << kThreads << "threads" << endl;
   unordered_map<string, string> bpe[kThreads];
   vector<thread> threads;
   for (size_t i = 0; i < kThreads; i++) {
@@ -801,6 +805,59 @@ void applybpe(const char *outputFile, const char *inputFile,
       final_bpe[x.first] = x.second;
     }
   }
+#else
+#if defined(CONFIG_OMP_CRITICAL)
+  int nr_threads;
+  #pragma omp parallel
+  {
+    if (omp_get_thread_num() == 0) {
+      nr_threads = omp_get_num_threads();
+    }
+  }
+
+  cout << "omp critical region, number of threads = " << nr_threads << endl;
+  unordered_map<string, string> bpe[nr_threads];
+  unordered_map<string, string> final_bpe;
+
+  #pragma omp parallel for
+  for (size_t w = 0; w < bpeTokVec.size(); w++) {
+    auto &x = bpeTokVec[w];
+    auto str = process_bpe(x.second, codes, reversed_codes, vocab);
+    #pragma omp critical
+    {
+      final_bpe[x.first] = str;
+    }
+  }
+#elif defined(CONFIG_OMP_SINGLE_THREADED_MERGE)
+  int nr_threads;
+  #pragma omp parallel
+  {
+    if (omp_get_thread_num() == 0) {
+      nr_threads = omp_get_num_threads();
+    }
+  }
+
+  cout << "omp single thread merge, number of threads = " << nr_threads << endl;
+  unordered_map<string, string> bpe[nr_threads];
+
+  #pragma omp parallel for
+  for (size_t w = 0; w < bpeTokVec.size(); w++) {
+    auto &x = bpeTokVec[w];
+    auto str = process_bpe(x.second, codes, reversed_codes, vocab);
+    bpe[omp_get_thread_num()][x.first] = str;
+  }
+
+  unordered_map<string, string> final_bpe;
+  for (size_t i = 0; i < nr_threads; i++) {
+    for (auto x : bpe[i]) {
+      final_bpe[x.first] = x.second;
+    }
+  }
+#else
+#error "Define a parallel method"
+#endif
+#endif
+
   // output
   outputText(outputFile, inputFile, final_bpe);
   auto end = chrono::steady_clock::now();
