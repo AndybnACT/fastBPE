@@ -423,6 +423,169 @@ void split(vector<string> &splits, const string &text, char sep) {
     splits.push_back(text.substr(start));
 }
 
+string decode_gpt2_display_chars(const string& input) {
+    // Create the reverse mapping table for common GPT-2 display characters
+    // This maps Unicode codepoints to their original byte values
+    static const std::unordered_map<uint32_t, uint8_t> unicode_to_byte = {
+        // Space and control characters (0-32)
+        {0x0100, 0},    // Ā -> null
+        {0x0101, 1},    // ā -> SOH
+        {0x0102, 2},    // Ă -> STX
+        {0x0103, 3},    // ă -> ETX
+        {0x0104, 4},    // Ą -> EOT
+        {0x0105, 5},    // ą -> ENQ
+        {0x0106, 6},    // Ć -> ACK
+        {0x0107, 7},    // ć -> BEL
+        {0x0108, 8},    // Ĉ -> BS
+        {0x0109, 9},    // ĉ -> TAB
+        {0x010A, 10},   // Ċ -> LF (newline)
+        {0x010B, 11},   // ċ -> VT
+        {0x010C, 12},   // Č -> FF
+        {0x010D, 13},   // č -> CR (carriage return)
+        {0x010E, 14},   // Ď -> SO
+        {0x010F, 15},   // ď -> SI
+        {0x0110, 16},   // Đ -> DLE
+        {0x0111, 17},   // đ -> DC1
+        {0x0112, 18},   // Ē -> DC2
+        {0x0113, 19},   // ē -> DC3
+        {0x0114, 20},   // Ĕ -> DC4
+        {0x0115, 21},   // ĕ -> NAK
+        {0x0116, 22},   // Ė -> SYN
+        {0x0117, 23},   // ė -> ETB
+        {0x0118, 24},   // Ę -> CAN
+        {0x0119, 25},   // ę -> EM
+        {0x011A, 26},   // Ě -> SUB
+        {0x011B, 27},   // ě -> ESC
+        {0x011C, 28},   // Ĝ -> FS
+        {0x011D, 29},   // ĝ -> GS
+        {0x011E, 30},   // Ğ -> RS
+        {0x011F, 31},   // ğ -> US
+        {0x0120, 32},   // Ġ -> space
+
+        // Characters 127-160 (DEL and extended ASCII control)
+        {0x0121, 127},  // ġ -> DEL
+        {0x0122, 128},  // Ģ
+        {0x0123, 129},  // ģ
+        {0x0124, 130},  // Ĥ
+        {0x0125, 131},  // ĥ
+        {0x0126, 132},  // Ħ
+        {0x0127, 133},  // ħ
+        {0x0128, 134},  // Ĩ
+        {0x0129, 135},  // ĩ
+        {0x012A, 136},  // Ī
+        {0x012B, 137},  // ī
+        {0x012C, 138},  // Ĭ
+        {0x012D, 139},  // ĭ
+        {0x012E, 140},  // Į
+        {0x012F, 141},  // į
+        {0x0130, 142},  // İ
+        {0x0131, 143},  // ı
+        {0x0132, 144},  // Ĳ
+        {0x0133, 145},  // ĳ
+        {0x0134, 146},  // Ĵ
+        {0x0135, 147},  // ĵ
+        {0x0136, 148},  // Ķ
+        {0x0137, 149},  // ķ
+        {0x0138, 150},  // ĸ
+        {0x0139, 151},  // Ĺ
+        {0x013A, 152},  // ĺ
+        {0x013B, 153},  // Ļ
+        {0x013C, 154},  // ļ
+        {0x013D, 155},  // Ľ
+        {0x013E, 156},  // ľ
+        {0x013F, 157},  // Ŀ
+        {0x0140, 158},  // ŀ
+        {0x0141, 159},  // Ł
+        {0x0142, 160},  // ł
+
+        // Characters 161-172 (¡ to ¬) are handled specially by GPT-2,
+        // they're actually not remapped, but we skip them in the mapping
+        // continuing at 173 (soft hyphen)
+        {0x0143, 173},  // Ń -> soft hyphen
+    };
+
+    std::string result;
+    result.reserve(input.size());
+
+    size_t i = 0;
+    while (i < input.size()) {
+        unsigned char ch = static_cast<unsigned char>(input[i]);
+
+        // Handle UTF-8 multi-byte sequences
+        if ((ch & 0x80) == 0) {
+            // ASCII character (0-127), pass through except space mapping
+            result.push_back(ch);
+            i++;
+        }
+        else if ((ch & 0xE0) == 0xC0) {
+            // 2-byte UTF-8 sequence
+            if (i + 1 >= input.size()) {
+                result.push_back(ch);
+                i++;
+                continue;
+            }
+
+            uint32_t codepoint = ((ch & 0x1F) << 6) | (input[i + 1] & 0x3F);
+
+            auto it = unicode_to_byte.find(codepoint);
+            if (it != unicode_to_byte.end()) {
+                // Found a mapping, use original byte
+                result.push_back(static_cast<char>(it->second));
+            } else {
+                // No mapping, keep original characters
+                result.push_back(input[i]);
+                result.push_back(input[i + 1]);
+            }
+            i += 2;
+        }
+        else if ((ch & 0xF0) == 0xE0) {
+            // 3-byte UTF-8 sequence
+            if (i + 2 >= input.size()) {
+                result.push_back(ch);
+                i++;
+                continue;
+            }
+
+            uint32_t codepoint = ((ch & 0x0F) << 12) |
+                                ((input[i + 1] & 0x3F) << 6) |
+                                (input[i + 2] & 0x3F);
+
+            auto it = unicode_to_byte.find(codepoint);
+            if (it != unicode_to_byte.end()) {
+                result.push_back(static_cast<char>(it->second));
+            } else {
+                // No mapping, keep original characters
+                result.push_back(input[i]);
+                result.push_back(input[i + 1]);
+                result.push_back(input[i + 2]);
+            }
+            i += 3;
+        }
+        else if ((ch & 0xF8) == 0xF0) {
+            // 4-byte UTF-8 sequence (not used in GPT-2 mappings)
+            if (i + 3 >= input.size()) {
+                result.push_back(ch);
+                i++;
+                continue;
+            }
+
+            // Just pass through
+            result.push_back(input[i]);
+            result.push_back(input[i + 1]);
+            result.push_back(input[i + 2]);
+            result.push_back(input[i + 3]);
+            i += 4;
+        }
+        else {
+            // Invalid UTF-8 or continuation byte, just pass through
+            result.push_back(ch);
+            i++;
+        }
+    }
+
+    return result;
+}
+
 void readVocab(const char *fp, unordered_map<string, uint32_t> &vocab) {
   ifstream file(fp);
   if (!file) {
@@ -430,15 +593,16 @@ void readVocab(const char *fp, unordered_map<string, uint32_t> &vocab) {
     exit(EXIT_FAILURE);
   }
   fprintf(stderr, "Loading vocabulary from %s ...\n", fp);
-  string line;
+  string line, key;
   uint64_t total = 0;
   while (getline(file, line)) {
     vector<string> splits;
     split(splits, line, ' ');
     assert(splits.size() == 2);
-    assert(vocab.find(splits[0]) == vocab.end());
+    key = decode_gpt2_display_chars(splits[0]);
+    assert(vocab.find(key) == vocab.end());
     int count = stoi(splits[1]);
-    vocab[splits[0]] = count;
+    vocab[key] = count;
     total += count;
   }
   fprintf(stderr, "Read %lu words (%lu unique) from vocabulary file.\n", total,
@@ -456,10 +620,14 @@ void readCodes(const char *fp, unordered_map<tps, uint32_t, pair_hash> &codes,
   string line;
   while (getline(file, line)) {
     vector<string> splits;
+    string pair0, pair1;
+
     split(splits, line, ' ');
     assert(splits.size() == 3);
-    auto pair = make_pair(splits[0], splits[1]);
-    string concat = splits[0] + splits[1];
+    pair0 = decode_gpt2_display_chars(splits[0]);
+    pair1 = decode_gpt2_display_chars(splits[1]);
+    auto pair = make_pair(pair0, pair1);
+    string concat = pair0 + pair1;
     assert(codes.find(pair) == codes.end());
     assert(reversed_codes.find(concat) == reversed_codes.end());
     codes[pair] = codes.size();
