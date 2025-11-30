@@ -19,6 +19,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <chrono>
+#include <cmath>
 
 
 namespace fastBPE {
@@ -41,9 +43,10 @@ int safeOpen(const char *file_path, int flags, mode_t mode = 0) {
   return fd;
 }
 
-void readText(const char *fp, unordered_map<string, uint32_t> &word_count) {
+size_t readText(const char *fp, unordered_map<string, uint32_t> &word_count) {
   string cur_word;
   uint64_t total = 0;
+  size_t sz = 0;
   auto deal_with_char = [&](char cur_char){
     if (cur_char == ' ' || cur_char == '\n') {
       if (cur_word.size() == 0)
@@ -80,9 +83,11 @@ void readText(const char *fp, unordered_map<string, uint32_t> &word_count) {
     for (size_t i = 0; i < size; i++) {
       deal_with_char(f[i]);
     }
+    sz = size;
   }
   fprintf(stderr, "Read %lu words (%lu unique) from text file.\n", total,
           word_count.size());
+  return sz;
 }
 
 std::pair<size_t, uint64_t> output_or_count(
@@ -581,6 +586,8 @@ string process_bpe(vector<string> &subwords,
 void applybpe(const char *outputFile, const char *inputFile,
               const char *codesPath, const char *vocabPath) {
   // read vocabulary (to which we want to limit the output file)
+  auto start = chrono::steady_clock::now();
+  unsigned long sz;
   unordered_map<string, uint32_t> vocab;
   if (strcmp(vocabPath, "") != 0) {
     readVocab(vocabPath, vocab);
@@ -593,7 +600,7 @@ void applybpe(const char *outputFile, const char *inputFile,
 
   // read input file words
   unordered_map<string, uint32_t> word_count;
-  readText(inputFile, word_count);
+  sz = readText(inputFile, word_count);
 
   // tokenize
   unordered_map<string, vector<string>> bpeTok;
@@ -628,6 +635,11 @@ void applybpe(const char *outputFile, const char *inputFile,
   }
   // output
   outputText(outputFile, inputFile, final_bpe);
+  auto end = chrono::steady_clock::now();
+  auto duration = chrono::duration_cast<std::chrono::microseconds>(end - start);
+  double bw = (double) sz / (double) duration.count() * 1e6f;
+  cout << "Time spent = " << duration.count() << "ms" << endl;
+  cout << "Bandwidth = " << bw << " B/sec, " << bw / pow(2,20) << "MB/sec" << endl;
 }
 
 
