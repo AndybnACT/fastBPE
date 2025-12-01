@@ -58,7 +58,7 @@ int safeOpen(const char *file_path, int flags, mode_t mode = 0) {
   return fd;
 }
 
-size_t readText(const char *fp, unordered_map<string, uint32_t> &word_count) {
+size_t readText(const char *fp, _hash_map<string, uint32_t> &word_count) {
   string cur_word;
   uint64_t total = 0;
   size_t sz = 0;
@@ -184,8 +184,8 @@ struct pair_hash {
   }
 };
 
-void tokenize(const unordered_map<string, uint32_t> &word_count,
-              unordered_map<string, uint32_t> &token_to_int,
+void tokenize(const _hash_map<string, uint32_t> &word_count,
+              _hash_map<string, uint32_t> &token_to_int,
               vector<string> &int_to_token, vector<list<uint32_t>> &words,
               vector<int32_t> &counts) {
 
@@ -222,8 +222,8 @@ void tokenize(const unordered_map<string, uint32_t> &word_count,
   }
 }
 
-void tokenize_str(const unordered_map<string, uint32_t> &word_count,
-                  unordered_map<string, vector<string>> &words) {
+void tokenize_str(const _hash_map<string, uint32_t> &word_count,
+                  _hash_map<string, vector<string>> &words) {
 
   for (auto &x : word_count) {
     auto &word = x.first;
@@ -249,12 +249,12 @@ void tokenize_str(const unordered_map<string, uint32_t> &word_count,
 
 using tp = pair<uint32_t, uint32_t>;
 using tps = pair<string, string>;
-using pc = unordered_map<tp, pair<int32_t, tp> *, pair_hash>;
+using pc = _hash_map<tp, pair<int32_t, tp> *, pair_hash>;
 
 void count_in_word(
     list<uint32_t> &word, uint32_t wi, uint32_t count, pc &pair_counts,
     vector<pair<int32_t, tp>> &contiguous_counts,
-    unordered_map<tp, unordered_set<uint32_t>, pair_hash> &where) {
+    _hash_map<tp, unordered_set<uint32_t>, pair_hash> &where) {
   bool second = false;
   tp cur_pair;
   for (uint32_t token : word) {
@@ -298,7 +298,7 @@ void find_maxp(vector<pair<int32_t, tp>> &contiguous_counts, tp &maxp,
 
 void getvocab(const char *inputFile1, const char *inputFile2) {
   // get vocab
-  unordered_map<string, uint32_t> word_count;
+  _hash_map<string, uint32_t> word_count;
   readText(inputFile1, word_count);
   if (strcmp(inputFile2, "") != 0) {
     readText(inputFile2, word_count);
@@ -321,14 +321,14 @@ void getvocab(const char *inputFile1, const char *inputFile2) {
 void learnbpe(const uint32_t kNPairs, const char *inputFile1,
               const char *inputFile2) {
   // get vocab
-  unordered_map<string, uint32_t> word_count;
+  _hash_map<string, uint32_t> word_count;
   readText(inputFile1, word_count);
   if (strcmp(inputFile2, "") != 0) {
     readText(inputFile2, word_count);
   }
 
   // a token is an int, it represents a string
-  unordered_map<string, uint32_t> token_to_int;
+  _hash_map<string, uint32_t> token_to_int;
   vector<string> int_to_token;
 
   vector<list<uint32_t>> words;
@@ -340,7 +340,7 @@ void learnbpe(const uint32_t kNPairs, const char *inputFile1,
   contiguous_counts.reserve(kMaxPairs);
 
   pc pair_counts;
-  unordered_map<tp, unordered_set<uint32_t>, pair_hash> where_to_update;
+  _hash_map<tp, unordered_set<uint32_t>, pair_hash> where_to_update;
 
   tp cur_pair;
   int32_t max_c = 0;
@@ -441,7 +441,7 @@ void split(vector<string> &splits, const string &text, char sep) {
 string decode_gpt2_display_chars(const string& input) {
     // Create the reverse mapping table for common GPT-2 display characters
     // This maps Unicode codepoints to their original byte values
-    static const std::unordered_map<uint32_t, uint8_t> unicode_to_byte = {
+    static const _hash_map<uint32_t, uint8_t> unicode_to_byte = {
         // Space and control characters (0-32)
         {0x0100, 0},    // Ā -> null
         {0x0101, 1},    // ā -> SOH
@@ -601,7 +601,7 @@ string decode_gpt2_display_chars(const string& input) {
     return result;
 }
 
-void readVocab(const char *fp, unordered_map<string, uint32_t> &vocab) {
+void readVocab(const char *fp, _hash_map<string, uint32_t> &vocab) {
   ifstream file(fp);
   if (!file) {
     fprintf(stderr, "Cannot open vocabulary file %s\n", fp);
@@ -624,8 +624,8 @@ void readVocab(const char *fp, unordered_map<string, uint32_t> &vocab) {
           vocab.size());
 }
 
-void readCodes(const char *fp, unordered_map<tps, uint32_t, pair_hash> &codes,
-               unordered_map<string, tps> &reversed_codes) {
+void readCodes(const char *fp, _hash_map<tps, uint32_t, pair_hash> &codes,
+               _hash_map<string, tps> &reversed_codes) {
   ifstream file(fp);
   if (!file) {
     fprintf(stderr, "Cannot open codes file %s\n", fp);
@@ -652,8 +652,8 @@ void readCodes(const char *fp, unordered_map<tps, uint32_t, pair_hash> &codes,
 }
 
 void decompose(const string s, vector<string> &newSubwords,
-               const unordered_map<string, tps> &reversed_codes,
-               const unordered_map<string, uint32_t> &vocab, bool isFinal) {
+               const _hash_map<string, tps> &reversed_codes,
+               const _hash_map<string, uint32_t> &vocab, bool isFinal) {
   auto it = reversed_codes.find(s);
   if (it == reversed_codes.end()) {
     // TODO this whole block below is just some sanity check
@@ -689,8 +689,8 @@ void decompose(const string s, vector<string> &newSubwords,
 }
 
 void limitVocab(const vector<string> &subwords, vector<string> &newSubwords,
-                const unordered_map<string, tps> &reversed_codes,
-                const unordered_map<string, uint32_t> &vocab) {
+                const _hash_map<string, tps> &reversed_codes,
+                const _hash_map<string, uint32_t> &vocab) {
   string query;
   for (size_t i = 0; i < subwords.size(); i++) {
     bool isFinal = i == subwords.size() - 1;
@@ -709,9 +709,9 @@ void limitVocab(const vector<string> &subwords, vector<string> &newSubwords,
 }
 
 string process_bpe(vector<string> &subwords,
-                   unordered_map<tps, uint32_t, pair_hash> &codes,
-                   unordered_map<string, tps> &reversed_codes,
-                   unordered_map<string, uint32_t> &vocab) {
+                   _hash_map<tps, uint32_t, pair_hash> &codes,
+                   _hash_map<string, tps> &reversed_codes,
+                   _hash_map<string, uint32_t> &vocab) {
   // merge subWords as much as possible
   vector<string> newSubwords;
   while (subwords.size() > 1) {
@@ -771,22 +771,22 @@ void applybpe(const char *outputFile, const char *inputFile,
   // read vocabulary (to which we want to limit the output file)
   auto start = chrono::steady_clock::now();
   unsigned long sz;
-  unordered_map<string, uint32_t> vocab;
+  _hash_map<string, uint32_t> vocab;
   if (strcmp(vocabPath, "") != 0) {
     readVocab(vocabPath, vocab);
   }
 
   // read codes
-  unordered_map<tps, uint32_t, pair_hash> codes;
-  unordered_map<string, tps> reversed_codes;
+  _hash_map<tps, uint32_t, pair_hash> codes;
+  _hash_map<string, tps> reversed_codes;
   readCodes(codesPath, codes, reversed_codes);
 
   // read input file words
-  unordered_map<string, uint32_t> word_count;
+  _hash_map<string, uint32_t> word_count;
   sz = readText(inputFile, word_count);
 
   // tokenize
-  unordered_map<string, vector<string>> bpeTok;
+  _hash_map<string, vector<string>> bpeTok;
   tokenize_str(word_count, bpeTok);
 
   vector<pair<string, vector<string>>> bpeTokVec;
@@ -799,7 +799,7 @@ void applybpe(const char *outputFile, const char *inputFile,
 #ifndef CONFIG_OMP
 #ifndef CONFIG_MPI
   cout << "Spawning " << kThreads << "threads" << endl;
-  unordered_map<string, string> bpe[kThreads];
+  _hash_map<string, string> bpe[kThreads];
   vector<thread> threads;
   for (size_t i = 0; i < kThreads; i++) {
     threads.emplace_back(
@@ -813,7 +813,7 @@ void applybpe(const char *outputFile, const char *inputFile,
     );
   }
 
-  unordered_map<string, string> final_bpe;
+  _hash_map<string, string> final_bpe;
   for (size_t i = 0; i < kThreads; i++) {
     threads[i].join();
     for (auto x : bpe[i]) {
@@ -822,15 +822,15 @@ void applybpe(const char *outputFile, const char *inputFile,
   }
 #else /* CONFIG_MPI */
   mpi::communicator world;
-  unordered_map<string, string> bpe;
+  _hash_map<string, string> bpe;
 
   for (size_t w = world.rank(); w < bpeTokVec.size(); w += world.size()) {
     auto &x = bpeTokVec[w];
     bpe[x.first] = process_bpe(x.second, codes, reversed_codes, vocab);
   }
 
-  vector<unordered_map<string, string>> all_bpe;
-  unordered_map<string, string> final_bpe;
+  vector<_hash_map<string, string>> all_bpe;
+  _hash_map<string, string> final_bpe;
 
   if (world.rank() == 0) {
     gather(world, bpe, all_bpe, 0);
@@ -857,7 +857,7 @@ void applybpe(const char *outputFile, const char *inputFile,
 
 #if defined(CONFIG_OMP_CRITICAL)
   cout << "omp critical region, number of threads = " << nr_threads << endl;
-  unordered_map<string, string> final_bpe;
+  _hash_map<string, string> final_bpe;
 
   #pragma omp parallel for
   for (size_t w = 0; w < bpeTokVec.size(); w++) {
@@ -870,7 +870,7 @@ void applybpe(const char *outputFile, const char *inputFile,
   }
 #elif defined(CONFIG_OMP_SINGLE_THREADED_MERGE)
   cout << "omp single thread merge, number of threads = " << nr_threads << endl;
-  unordered_map<string, string> bpe[nr_threads];
+  _hash_map<string, string> bpe[nr_threads];
 
   #pragma omp parallel for
   for (size_t w = 0; w < bpeTokVec.size(); w++) {
@@ -879,7 +879,7 @@ void applybpe(const char *outputFile, const char *inputFile,
     bpe[omp_get_thread_num()][x.first] = str;
   }
 
-  unordered_map<string, string> final_bpe;
+  _hash_map<string, string> final_bpe;
   for (size_t i = 0; i < nr_threads; i++) {
     for (auto x : bpe[i]) {
       final_bpe[x.first] = x.second;
@@ -923,9 +923,9 @@ void applybpe(const char *outputFile, const char *inputFile,
 
 class BPEApplyer {
 private:
-  unordered_map<string, uint32_t> vocab;
-  unordered_map<tps, uint32_t, pair_hash> codes;
-  unordered_map<string, tps> reversed_codes;
+  _hash_map<string, uint32_t> vocab;
+  _hash_map<tps, uint32_t, pair_hash> codes;
+  _hash_map<string, tps> reversed_codes;
 
 public:
   BPEApplyer(const string& codesPath, const string& vocabPath) {
