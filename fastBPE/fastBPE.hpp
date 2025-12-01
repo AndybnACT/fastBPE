@@ -29,6 +29,14 @@
 #define _hash_map unordered_map
 #endif
 
+#ifdef CONFIG_MPI
+#include <boost/mpi.hpp>
+#include <boost/mpi/environment.hpp>
+#include <boost/mpi/communicator.hpp>
+#include <boost/serialization/unordered_map.hpp>
+namespace mpi = boost::mpi;
+#endif
+
 
 namespace fastBPE {
 
@@ -98,7 +106,7 @@ size_t readText(const char *fp, unordered_map<string, uint32_t> &word_count) {
 }
 
 std::pair<size_t, uint64_t> output_or_count(
-  _hash_map<string, string> &bpe, size_t size, char *f, char *fo
+  unordered_map<string, string> &bpe, size_t size, char *f, char *fo
 ) {
   string cur_word;
   size_t charOut = 0;
@@ -131,7 +139,7 @@ std::pair<size_t, uint64_t> output_or_count(
 }
 
 void outputText(const char *fpo, const char *fp,
-                _hash_map<string, string> &bpe) {
+                unordered_map<string, string> &bpe) {
 
   int fd = safeOpen(fp, O_RDONLY);
   auto fdOut = safeOpen(fpo, O_RDWR | O_CREAT | O_TRUNC, 0666);
@@ -812,6 +820,7 @@ void applybpe(const char *outputFile, const char *inputFile,
     }
   }
 #else
+#if defined(CONFIG_OMP_CRITICAL)
   int nr_threads;
   #pragma omp parallel
   {
@@ -820,9 +829,12 @@ void applybpe(const char *outputFile, const char *inputFile,
     }
   }
 
-#if defined(CONFIG_OMP_CRITICAL)
   cout << "omp critical region, number of threads = " << nr_threads << endl;
+  unordered_map<string, string> bpe[nr_threads];
+
   unordered_map<string, string> final_bpe;
+  // Added: reserve space to avoid repeated rehashing in the final map
+  final_bpe.reserve(bpeTokVec.size());  // Reserve approximate number of unique keys
 
   #pragma omp parallel for
   for (size_t w = 0; w < bpeTokVec.size(); w++) {
@@ -830,56 +842,122 @@ void applybpe(const char *outputFile, const char *inputFile,
     auto str = process_bpe(x.second, codes, reversed_codes, vocab);
     #pragma omp critical
     {
+      // This still does a copy, which is fine for the critical variant
       final_bpe[x.first] = str;
     }
   }
+
 #elif defined(CONFIG_OMP_SINGLE_THREADED_MERGE)
+  int nr_threads;
+  #pragma omp parallel
+  {
+    if (omp_get_thread_num() == 0) {
+      nr_threads = omp_get_num_threads();
+    }
+  }
+
   cout << "omp single thread merge, number of threads = " << nr_threads << endl;
-  unordered_map<string, string> bpe[nr_threads];
+
+  // Changed: use std::vector instead of VLA on the stack
+  // Reason: VLA is non-standard and large arrays of unordered_map on the stack are risky.
+  std::vector<std::unordered_map<string, string>> bpe(nr_threads);
+  // Added: reserve per-thread capacity to reduce rehashing and allocations
+  const size_t approx_per_thread = bpeTokVec.size() / std::max(1, nr_threads);
+  for (int i = 0; i < nr_threads; ++i) {
+    bpe[i].reserve(approx_per_thread + 1);  // Reserve an approximate share of the work
+  }
 
   #pragma omp parallel for
   for (size_t w = 0; w < bpeTokVec.size(); w++) {
     auto &x = bpeTokVec[w];
     auto str = process_bpe(x.second, codes, reversed_codes, vocab);
-    bpe[omp_get_thread_num()][x.first] = str;
+    // Each thread writes only to its own map; no synchronization needed here.
+    bpe[omp_get_thread_num()][x.first] = std::move(str);  // Use move to avoid extra string copies
   }
 
   unordered_map<string, string> final_bpe;
-  for (size_t i = 0; i < nr_threads; i++) {
-    for (auto x : bpe[i]) {
-      final_bpe[x.first] = x.second;
+  // Added: reserve space for all keys to avoid repeated rehashing in the final merge.
+  final_bpe.reserve(bpeTokVec.size());
+
+  for (size_t i = 0; i < static_cast<size_t>(nr_threads); i++) {
+    // Changed: iterate by reference and move into final_bpe to avoid copies
+    for (auto &kv : bpe[i]) {
+      // Move both key and value into the final map to minimize allocations and copies.
+      final_bpe.emplace(std::move(kv.first), std::move(kv.second));
     }
   }
+
 #elif defined(CONFIG_OMP_TBB)
+  int nr_threads = 0;
+  #pragma omp parallel
+  {
+    // Determine the actual number of OpenMP threads at runtime
+    if (omp_get_thread_num() == 0) {
+      nr_threads = omp_get_num_threads();
+    }
+  }
+
   cout << "omp+tbb, number of threads = " << nr_threads << endl;
-  tbb::concurrent_unordered_map<string, string> final_bpe;
+
+  // NOTE: Use a concurrent map during the parallel phase to allow
+  // thread-safe inserts from multiple OpenMP threads.
+  tbb::concurrent_unordered_map<string, string> concurrent_bpe(bpeTokVec.size());
 
   #pragma omp parallel for
   for (size_t w = 0; w < bpeTokVec.size(); w++) {
     auto &x = bpeTokVec[w];
     auto str = process_bpe(x.second, codes, reversed_codes, vocab);
-    final_bpe[x.first] = str;
+
+    // NOTE: concurrent_unordered_map is thread-safe for concurrent writes.
+    // We use std::move to avoid an extra copy of the potentially large string.
+    concurrent_bpe[x.first] = std::move(str);
   }
+
+  // NOTE: outputText expects a std::unordered_map<string,string>&,
+  // so we convert the concurrent container into a regular unordered_map
+  // *after* the parallel region has completed.
+  unordered_map<string, string> final_bpe;
+  final_bpe.reserve(concurrent_bpe.size());
+
+  for (auto &kv : concurrent_bpe) {
+    // Key type in concurrent_unordered_map is const key, so we copy the key.
+    // We can still move the value to reduce copies.
+    final_bpe.emplace(kv.first, std::move(kv.second));
+  }
+
+
 #else
 #error "Define a parallel method"
 #endif
 #endif
 
+
   // output
+#if CONFIG_MPI
+  outputText(outputFile, inputFile, final_bpe);
+  if (world.rank() == 0) {
+    auto end = chrono::steady_clock::now();
+    auto duration = chrono::duration_cast<std::chrono::microseconds>(end - start);
+    double bw = (double) sz / (double) duration.count() * 1e6f;
+    cout << "Time spent = " << duration.count() << "ms" << endl;
+    cout << "Bandwidth = " << bw << " B/sec, " << bw / pow(2,20) << "MB/sec" << endl;
+  }
+#else
   outputText(outputFile, inputFile, final_bpe);
   auto end = chrono::steady_clock::now();
   auto duration = chrono::duration_cast<std::chrono::microseconds>(end - start);
   double bw = (double) sz / (double) duration.count() * 1e6f;
   cout << "Time spent = " << duration.count() << "ms" << endl;
   cout << "Bandwidth = " << bw << " B/sec, " << bw / pow(2,20) << "MB/sec" << endl;
+#endif
 }
 
 
 class BPEApplyer {
 private:
-  unordered_map<string, uint32_t> vocab;
-  unordered_map<tps, uint32_t, pair_hash> codes;
-  unordered_map<string, tps> reversed_codes;
+  _hash_map<string, uint32_t> vocab;
+  _hash_map<tps, uint32_t, pair_hash> codes;
+  _hash_map<string, tps> reversed_codes;
 
 public:
   BPEApplyer(const string& codesPath, const string& vocabPath) {
