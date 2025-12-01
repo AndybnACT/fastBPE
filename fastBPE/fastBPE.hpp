@@ -29,6 +29,14 @@
 #define _hash_map unordered_map
 #endif
 
+#ifdef CONFIG_MPI
+#include <boost/mpi.hpp>
+#include <boost/mpi/environment.hpp>
+#include <boost/mpi/communicator.hpp>
+#include <boost/serialization/unordered_map.hpp>
+namespace mpi = boost::mpi;
+#endif
+
 
 namespace fastBPE {
 
@@ -789,6 +797,7 @@ void applybpe(const char *outputFile, const char *inputFile,
   // apply BPE codes to each word
 
 #ifndef CONFIG_OMP
+#ifndef CONFIG_MPI
   cout << "Spawning " << kThreads << "threads" << endl;
   unordered_map<string, string> bpe[kThreads];
   vector<thread> threads;
@@ -811,7 +820,33 @@ void applybpe(const char *outputFile, const char *inputFile,
       final_bpe[x.first] = x.second;
     }
   }
-#else
+#else /* CONFIG_MPI */
+  mpi::communicator world;
+  unordered_map<string, string> bpe;
+
+  for (size_t w = world.rank(); w < bpeTokVec.size(); w += world.size()) {
+    auto &x = bpeTokVec[w];
+    bpe[x.first] = process_bpe(x.second, codes, reversed_codes, vocab);
+  }
+
+  vector<unordered_map<string, string>> all_bpe;
+  unordered_map<string, string> final_bpe;
+
+  if (world.rank() == 0) {
+    gather(world, bpe, all_bpe, 0);
+  } else {
+    gather(world, bpe, 0);
+  }
+
+  if (world.rank() == 0) {
+    for (size_t i = 0; i < world.size(); i++) {
+      for (auto x : all_bpe[i]) {
+        final_bpe[x.first] = x.second;
+      }
+    }
+  }
+#endif
+#else /* CONFIG_OMP  */
   int nr_threads;
   #pragma omp parallel
   {
@@ -866,12 +901,23 @@ void applybpe(const char *outputFile, const char *inputFile,
 #endif
 
   // output
+#if CONFIG_MPI
+  if (world.rank() == 0) { // we will parallelize it later
+    outputText(outputFile, inputFile, final_bpe);
+    auto end = chrono::steady_clock::now();
+    auto duration = chrono::duration_cast<std::chrono::microseconds>(end - start);
+    double bw = (double) sz / (double) duration.count() * 1e6f;
+    cout << "Time spent = " << duration.count() << "ms" << endl;
+    cout << "Bandwidth = " << bw << " B/sec, " << bw / pow(2,20) << "MB/sec" << endl;
+  }
+#else
   outputText(outputFile, inputFile, final_bpe);
   auto end = chrono::steady_clock::now();
   auto duration = chrono::duration_cast<std::chrono::microseconds>(end - start);
   double bw = (double) sz / (double) duration.count() * 1e6f;
   cout << "Time spent = " << duration.count() << "ms" << endl;
   cout << "Bandwidth = " << bw << " B/sec, " << bw / pow(2,20) << "MB/sec" << endl;
+#endif
 }
 
 
@@ -934,3 +980,4 @@ void applybpe_stream(const char *codesPath, const char *vocabPath) {
 }
 
 };
+

@@ -18,6 +18,13 @@ void printUsage() {
 
 
 int main(int argc, char **argv) {
+#ifdef CONFIG_MPI
+  mpi::environment env(argc, argv);
+  mpi::communicator world;
+  cout << "MPI initialized, I am process " << world.rank() << " of " << world.size()
+            << "." << endl;
+#endif
+
   if (argc < 2) {
     printUsage();
     exit(EXIT_FAILURE);
