@@ -37,6 +37,160 @@
 namespace mpi = boost::mpi;
 #endif
 
+#include <cstdint>
+#include <vector>
+#include <cstring>
+
+#ifdef CONFIG_MPI
+#include <mpi.h>
+#endif
+
+#ifdef CONFIG_MPI
+static void serialize_map(
+    const std::unordered_map<std::string, std::string> &m,
+    std::vector<char> &buffer)
+{
+    buffer.clear();
+    buffer.reserve(m.size() * 32); 
+
+    std::uint64_t n_pairs = static_cast<std::uint64_t>(m.size());
+    buffer.insert(buffer.end(),
+                  reinterpret_cast<const char *>(&n_pairs),
+                  reinterpret_cast<const char *>(&n_pairs) + sizeof(std::uint64_t));
+
+    for (const auto &kv : m) {
+        const std::string &k = kv.first;
+        const std::string &v = kv.second;
+
+        std::uint32_t klen = static_cast<std::uint32_t>(k.size());
+        std::uint32_t vlen = static_cast<std::uint32_t>(v.size());
+
+        buffer.insert(buffer.end(),
+                      reinterpret_cast<const char *>(&klen),
+                      reinterpret_cast<const char *>(&klen) + sizeof(std::uint32_t));
+        buffer.insert(buffer.end(),
+                      reinterpret_cast<const char *>(&vlen),
+                      reinterpret_cast<const char *>(&vlen) + sizeof(std::uint32_t));
+
+        buffer.insert(buffer.end(), k.data(), k.data() + k.size());
+        buffer.insert(buffer.end(), v.data(), v.data() + v.size());
+    }
+}
+
+#ifdef CONFIG_MPI
+#include <mpi.h>
+#include <cstdint>
+#include <vector>
+#include <cstring>
+
+// word_count: unordered_map<string, uint32_t>
+static void serialize_word_count(
+    const std::unordered_map<std::string, uint32_t> &m,
+    std::vector<char> &buffer)
+{
+    buffer.clear();
+    buffer.reserve(m.size() * 16); 
+
+    std::uint64_t n_pairs = static_cast<std::uint64_t>(m.size());
+    buffer.insert(buffer.end(),
+                  reinterpret_cast<const char *>(&n_pairs),
+                  reinterpret_cast<const char *>(&n_pairs) + sizeof(std::uint64_t));
+
+    for (const auto &kv : m) {
+        const std::string &k = kv.first;
+        std::uint32_t v      = kv.second;
+
+        std::uint32_t klen = static_cast<std::uint32_t>(k.size());
+
+        buffer.insert(buffer.end(),
+                      reinterpret_cast<const char *>(&klen),
+                      reinterpret_cast<const char *>(&klen) + sizeof(std::uint32_t));
+        buffer.insert(buffer.end(),
+                      reinterpret_cast<const char *>(&v),
+                      reinterpret_cast<const char *>(&v) + sizeof(std::uint32_t));
+        buffer.insert(buffer.end(), k.data(), k.data() + k.size());
+    }
+}
+
+// 反序列化到 word_count
+static void deserialize_word_count(
+    const char *data, std::size_t len,
+    std::unordered_map<std::string, uint32_t> &out)
+{
+    using namespace std;
+
+    const char *p   = data;
+    const char *end = data + len;
+
+    if (end - p < static_cast<std::ptrdiff_t>(sizeof(std::uint64_t))) {
+        return;
+    }
+
+    std::uint64_t n_pairs = 0;
+    std::memcpy(&n_pairs, p, sizeof(std::uint64_t));
+    p += sizeof(std::uint64_t);
+
+    out.clear();
+    out.reserve(static_cast<size_t>(n_pairs));
+
+    for (std::uint64_t i = 0; i < n_pairs && p < end; ++i) {
+        if (end - p < static_cast<std::ptrdiff_t>(2 * sizeof(std::uint32_t))) {
+            break;
+        }
+
+        std::uint32_t klen = 0, v = 0;
+        std::memcpy(&klen, p, sizeof(std::uint32_t)); p += sizeof(std::uint32_t);
+        std::memcpy(&v,   p, sizeof(std::uint32_t)); p += sizeof(std::uint32_t);
+
+        if (end - p < static_cast<std::ptrdiff_t>(klen)) {
+            break;
+        }
+
+        std::string key(p, p + klen);
+        p += klen;
+
+        out.emplace(std::move(key), v);
+    }
+}
+#endif // CONFIG_MPI
+
+static void deserialize_map_segment(
+    const char *data, std::size_t len,
+    std::unordered_map<std::string, std::string> &out)
+{
+    const char *p   = data;
+    const char *end = data + len;
+
+    if (end - p < static_cast<std::ptrdiff_t>(sizeof(std::uint64_t))) {
+        return;
+    }
+
+    std::uint64_t n_pairs = 0;
+    std::memcpy(&n_pairs, p, sizeof(std::uint64_t));
+    p += sizeof(std::uint64_t);
+
+    for (std::uint64_t i = 0; i < n_pairs && p < end; ++i) {
+        if (end - p < static_cast<std::ptrdiff_t>(2 * sizeof(std::uint32_t))) {
+            break;
+        }
+        std::uint32_t klen = 0, vlen = 0;
+        std::memcpy(&klen, p, sizeof(std::uint32_t)); p += sizeof(std::uint32_t);
+        std::memcpy(&vlen, p, sizeof(std::uint32_t)); p += sizeof(std::uint32_t);
+
+        if (end - p < static_cast<std::ptrdiff_t>(klen + vlen)) {
+            break;
+        }
+
+        std::string key(p, p + klen);
+        p += klen;
+
+        std::string val(p, p + vlen);
+        p += vlen;
+
+        out.emplace(std::move(key), std::move(val));
+    }
+}
+#endif // CONFIG_MPI
 
 namespace fastBPE {
 
@@ -106,73 +260,138 @@ size_t readText(const char *fp, unordered_map<string, uint32_t> &word_count) {
 }
 
 std::pair<size_t, uint64_t> output_or_count(
-  unordered_map<string, string> &bpe, size_t size, char *f, char *fo
-) {
-  string cur_word;
-  size_t charOut = 0;
-  uint64_t total = 0;
-  for (size_t i = 0; i < size; i++) {
-    auto &cur_char = f[i];
-    if (cur_char == ' ' || cur_char == '\n') {
-      if (cur_word.size() == 0) {
-        if (fo != nullptr) fo[charOut] = cur_char;
-        charOut++;
-        continue;
-      }
-      // end of word : write bpe to output
-      auto it = bpe.find(cur_word);
-      assert(it != bpe.end());
-      for (auto x : it->second) {
-        if (fo != nullptr) fo[charOut] = x;
-        charOut++;
-      }
-      if (fo != nullptr) fo[charOut] = cur_char;
-      charOut++;
+    const std::unordered_map<std::string, std::string> &bpe,
+    size_t size,
+    const char *f,
+    char *fo)
+{
+    using namespace std;
 
-      total++;
-      cur_word.clear();
-    } else {
-      cur_word.push_back(cur_char);
+    const char *end = f + size;
+    string cur_word;
+    cur_word.reserve(64); 
+
+    size_t   charOut = 0;
+    uint64_t total   = 0;
+
+    auto flush_word = [&](char sep) {
+        if (cur_word.empty()) {
+            if (fo) fo[charOut] = sep;
+            ++charOut;
+            return;
+        }
+
+        auto it = bpe.find(cur_word);
+        if (it == bpe.end()) {
+            if (fo) {
+                memcpy(fo + charOut, cur_word.data(), cur_word.size());
+            }
+            charOut += cur_word.size();
+        } else {
+            const std::string &out = it->second;
+            if (fo) {
+                memcpy(fo + charOut, out.data(), out.size());
+            }
+            charOut += out.size();
+        }
+
+        if (fo) fo[charOut] = sep;
+        ++charOut;
+
+        ++total;
+        cur_word.clear();
+    };
+
+    for (const char *p = f; p != end; ++p) {
+        char c = *p;
+        if (c == ' ' || c == '\n') {
+            flush_word(c);
+        } else {
+            cur_word.push_back(c);
+        }
     }
-  }
-  return std::make_pair(charOut, total);
+
+    if (!cur_word.empty()) {
+        auto it = bpe.find(cur_word);
+        if (it == bpe.end()) {
+            if (fo) {
+                memcpy(fo + charOut, cur_word.data(), cur_word.size());
+            }
+            charOut += cur_word.size();
+        } else {
+            const std::string &out = it->second;
+            if (fo) {
+                memcpy(fo + charOut, out.data(), out.size());
+            }
+            charOut += out.size();
+        }
+        ++total;
+    }
+
+    return {charOut, total};
 }
 
+
 void outputText(const char *fpo, const char *fp,
-                unordered_map<string, string> &bpe) {
+                std::unordered_map<std::string, std::string> &bpe) {
+
+  using namespace std;
 
   int fd = safeOpen(fp, O_RDONLY);
-  auto fdOut = safeOpen(fpo, O_RDWR | O_CREAT | O_TRUNC, 0666);
+  int fdOut = safeOpen(fpo, O_WRONLY | O_CREAT | O_TRUNC, 0666);
 
   struct stat s;
-  fstat(fd, &s);
+  if (fstat(fd, &s) < 0) {
+    fprintf(stderr, "fstat failed on %s\n", fp);
+    exit(EXIT_FAILURE);
+  }
 
   fprintf(stderr, "Applying BPE to %s ...\n", fp);
-  auto size = s.st_size;
+  size_t size = static_cast<size_t>(s.st_size);
+
   char *f = (char *)mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+  if (f == MAP_FAILED) {
+    fprintf(stderr, "Input memory map failed : %d.\n", errno);
+    exit(EXIT_FAILURE);
+  }
 
   auto p = output_or_count(bpe, size, f, nullptr);
   size_t out_size = p.first;
 
-  if (ftruncate(fdOut, out_size) < 0) {
-    fprintf(stderr, "Couldn't truncate output file %s to size %lu\n", fpo,
-            out_size);
+  char *fo = (char *)malloc(out_size);
+  if (!fo) {
+    fprintf(stderr, "Failed to allocate %zu bytes for output buffer.\n", out_size);
+    munmap(f, size);
+    close(fdOut);
+    close(fd);
     exit(EXIT_FAILURE);
   }
 
-
-  char *fo = (char *)mmap(NULL, out_size, PROT_WRITE, MAP_SHARED, fdOut, 0);
-  if (fo == MAP_FAILED) {
-    fprintf(stderr, "Output memory map failed : %d.\n", errno);
-    exit(EXIT_FAILURE);
-  }
   p = output_or_count(bpe, size, f, fo);
-  fprintf(stderr, "Modified %lu words from text file.\n", p.second);
-  munmap(fo, out_size);
+
+  size_t written = 0;
+  while (written < out_size) {
+    ssize_t n = write(fdOut, fo + written, out_size - written);
+    if (n < 0) {
+      fprintf(stderr, "Error writing to output file %s: errno=%d\n", fpo, errno);
+      free(fo);
+      munmap(f, size);
+      close(fdOut);
+      close(fd);
+      exit(EXIT_FAILURE);
+    }
+    written += static_cast<size_t>(n);
+  }
+
+  fprintf(stderr, "Modified %lu words from text file.\n",
+          static_cast<unsigned long>(p.second));
+
+  free(fo);
   munmap(f, size);
   close(fdOut);
   close(fd);
 }
+
 
 struct pair_hash {
   template <class T1, class T2> size_t operator()(const pair<T1, T2> &p) const {
@@ -768,60 +987,152 @@ string process_bpe(vector<string> &subwords,
 
 void applybpe(const char *outputFile, const char *inputFile,
               const char *codesPath, const char *vocabPath) {
-  // read vocabulary (to which we want to limit the output file)
+  using namespace std;
+
   auto start = chrono::steady_clock::now();
-  unsigned long sz;
-  unordered_map<string, uint32_t> vocab;
+
+  auto t_after_vocab  = start;
+  auto t_after_codes  = start;
+  auto t_after_read   = start;
+  auto t_after_token  = start;
+  auto t_after_bpe    = start;
+  auto t_after_output = start;
+
+  // ===== READ vocab =====
+  unsigned long sz = 0;
+  std::unordered_map<std::string, uint32_t> vocab;
   if (strcmp(vocabPath, "") != 0) {
     readVocab(vocabPath, vocab);
   }
+  t_after_vocab = std::chrono::steady_clock::now();
 
-  // read codes
-  unordered_map<tps, uint32_t, pair_hash> codes;
-  unordered_map<string, tps> reversed_codes;
+  // ===== READ codes =====
+  std::unordered_map<tps, uint32_t, pair_hash> codes;
+  std::unordered_map<std::string, tps> reversed_codes;
   readCodes(codesPath, codes, reversed_codes);
+  t_after_codes = std::chrono::steady_clock::now();
 
-  // read input file words
-  unordered_map<string, uint32_t> word_count;
+  // ===== MPI rank / size =====
+  int mpi_rank = 0;
+  int mpi_size = 1;
+#ifdef CONFIG_MPI
+  MPI_Comm comm = MPI_COMM_WORLD;
+  MPI_Comm_rank(comm, &mpi_rank);
+  MPI_Comm_size(comm, &mpi_size);
+#endif
+
+  // ===== READ input=====
+  std::unordered_map<std::string, uint32_t> word_count;
+
+#ifdef CONFIG_MPI
+  if (mpi_rank == 0) {
+    sz = readText(inputFile, word_count);
+  }
+
+  MPI_Bcast(&sz, 1, MPI_UNSIGNED_LONG, 0, comm);
+
+  std::vector<char> wc_buffer;
+  if (mpi_rank == 0) {
+    serialize_word_count(word_count, wc_buffer); 
+  }
+
+  std::uint64_t wc_size = (mpi_rank == 0)
+                            ? static_cast<std::uint64_t>(wc_buffer.size())
+                            : 0;
+  MPI_Bcast(&wc_size, 1, MPI_UINT64_T, 0, comm);
+
+  if (mpi_rank != 0) {
+    wc_buffer.resize(static_cast<std::size_t>(wc_size));
+  }
+  if (wc_size > 0) {
+    MPI_Bcast(wc_buffer.data(), static_cast<int>(wc_size), MPI_BYTE, 0, comm);
+  }
+
+  if (mpi_rank != 0) {
+    deserialize_word_count(wc_buffer.data(), wc_buffer.size(), word_count);
+  }
+
+#else
+  // None MPI
   sz = readText(inputFile, word_count);
+#endif
 
-  // tokenize
-  unordered_map<string, vector<string>> bpeTok;
+  t_after_read = std::chrono::steady_clock::now();
+
+  // ===== tokenize=====
+  std::unordered_map<std::string, std::vector<std::string>> bpeTok;
   tokenize_str(word_count, bpeTok);
+  t_after_token = std::chrono::steady_clock::now();
 
   vector<pair<string, vector<string>>> bpeTokVec;
-  for (auto x : bpeTok) {
+  bpeTokVec.reserve(bpeTok.size());
+  for (auto &x : bpeTok) {
     bpeTokVec.push_back(x);
   }
 
-  // apply BPE codes to each word
+  // ===== MPI rank / size &  chunk =====
 
+
+#ifdef CONFIG_MPI
+  MPI_Comm_rank(comm, &mpi_rank);
+  MPI_Comm_size(comm, &mpi_size);
+#endif
+
+  size_t begin = 0;
+  size_t end   = bpeTokVec.size();
+
+#ifdef CONFIG_MPI
+  {
+    size_t total = bpeTokVec.size();
+    size_t base  = (mpi_size > 0) ? (total / mpi_size) : total;
+    size_t rem   = (mpi_size > 0) ? (total % mpi_size) : 0;
+
+    if (mpi_rank < rem) {
+      begin = mpi_rank * (base + 1);
+      end   = begin + (base + 1);
+    } else {
+      begin = mpi_rank * base + rem;
+      end   = begin + base;
+    }
+  }
+#endif
+
+  unordered_map<string, string> local_bpe;
+
+  // ====== BPE compute ======
 #ifndef CONFIG_OMP
-  cout << "Spawning " << kThreads << "threads" << endl;
+  cout << "Spawning " << kThreads << " threads on MPI rank "
+       << mpi_rank << "/" << mpi_size << endl;
+
   unordered_map<string, string> bpe[kThreads];
   vector<thread> threads;
+  threads.reserve(kThreads);
+
   for (size_t i = 0; i < kThreads; i++) {
     threads.emplace_back(
       [&](size_t this_thread) {
-        for (size_t w = this_thread; w < bpeTokVec.size(); w += kThreads) {
+        for (size_t w = begin + this_thread; w < end; w += kThreads) {
           auto &x = bpeTokVec[w];
-          bpe[this_thread][x.first] = process_bpe(x.second, codes, reversed_codes, vocab);
+          bpe[this_thread][x.first] =
+              process_bpe(x.second, codes, reversed_codes, vocab);
         }
       },
       i
     );
   }
 
-  unordered_map<string, string> final_bpe;
   for (size_t i = 0; i < kThreads; i++) {
     threads[i].join();
-    for (auto x : bpe[i]) {
-      final_bpe[x.first] = x.second;
+    for (auto &kv : bpe[i]) {
+      local_bpe.emplace(std::move(kv.first), std::move(kv.second));
     }
   }
-#else
+
+#else // CONFIG_OMP
+
+  // --- OMP variants ---
 #if defined(CONFIG_OMP_CRITICAL)
-  int nr_threads;
+  int nr_threads = 1;
   #pragma omp parallel
   {
     if (omp_get_thread_num() == 0) {
@@ -829,26 +1140,23 @@ void applybpe(const char *outputFile, const char *inputFile,
     }
   }
 
-  cout << "omp critical region, number of threads = " << nr_threads << endl;
-  unordered_map<string, string> bpe[nr_threads];
-
-  unordered_map<string, string> final_bpe;
-  // Added: reserve space to avoid repeated rehashing in the final map
-  final_bpe.reserve(bpeTokVec.size());  // Reserve approximate number of unique keys
+  cout << "omp critical region, MPI rank "
+       << mpi_rank << "/" << mpi_size
+       << ", number of threads = " << nr_threads << endl;
 
   #pragma omp parallel for
-  for (size_t w = 0; w < bpeTokVec.size(); w++) {
+  for (size_t w = begin; w < end; w++) {
     auto &x = bpeTokVec[w];
     auto str = process_bpe(x.second, codes, reversed_codes, vocab);
     #pragma omp critical
     {
-      // This still does a copy, which is fine for the critical variant
-      final_bpe[x.first] = str;
+      local_bpe[x.first] = std::move(str);
     }
   }
 
 #elif defined(CONFIG_OMP_SINGLE_THREADED_MERGE)
-  int nr_threads;
+
+  int nr_threads = 1;
   #pragma omp parallel
   {
     if (omp_get_thread_num() == 0) {
@@ -856,101 +1164,211 @@ void applybpe(const char *outputFile, const char *inputFile,
     }
   }
 
-  cout << "omp single thread merge, number of threads = " << nr_threads << endl;
+  cout << "omp single thread merge, MPI rank "
+       << mpi_rank << "/" << mpi_size
+       << ", number of threads = " << nr_threads << endl;
 
-  // Changed: use std::vector instead of VLA on the stack
-  // Reason: VLA is non-standard and large arrays of unordered_map on the stack are risky.
-  std::vector<std::unordered_map<string, string>> bpe(nr_threads);
-  // Added: reserve per-thread capacity to reduce rehashing and allocations
-  const size_t approx_per_thread = bpeTokVec.size() / std::max(1, nr_threads);
+  vector<unordered_map<string, string>> bpe(nr_threads);
+  const size_t local_size      = (end > begin) ? (end - begin) : 0;
+  const size_t approx_per_thr  = (nr_threads > 0) ? (local_size / nr_threads) : local_size;
+
   for (int i = 0; i < nr_threads; ++i) {
-    bpe[i].reserve(approx_per_thread + 1);  // Reserve an approximate share of the work
+    bpe[i].reserve(approx_per_thr + 1);
   }
 
   #pragma omp parallel for
-  for (size_t w = 0; w < bpeTokVec.size(); w++) {
+  for (size_t w = begin; w < end; w++) {
     auto &x = bpeTokVec[w];
     auto str = process_bpe(x.second, codes, reversed_codes, vocab);
-    // Each thread writes only to its own map; no synchronization needed here.
-    bpe[omp_get_thread_num()][x.first] = std::move(str);  // Use move to avoid extra string copies
+    bpe[omp_get_thread_num()][x.first] = std::move(str);
   }
 
-  unordered_map<string, string> final_bpe;
-  // Added: reserve space for all keys to avoid repeated rehashing in the final merge.
-  final_bpe.reserve(bpeTokVec.size());
-
-  for (size_t i = 0; i < static_cast<size_t>(nr_threads); i++) {
-    // Changed: iterate by reference and move into final_bpe to avoid copies
+  for (int i = 0; i < nr_threads; i++) {
     for (auto &kv : bpe[i]) {
-      // Move both key and value into the final map to minimize allocations and copies.
-      final_bpe.emplace(std::move(kv.first), std::move(kv.second));
+      local_bpe.emplace(std::move(kv.first), std::move(kv.second));
     }
   }
 
 #elif defined(CONFIG_OMP_TBB)
-  int nr_threads = 0;
+
+  int nr_threads = 1;
   #pragma omp parallel
   {
-    // Determine the actual number of OpenMP threads at runtime
     if (omp_get_thread_num() == 0) {
       nr_threads = omp_get_num_threads();
     }
   }
 
-  cout << "omp+tbb, number of threads = " << nr_threads << endl;
+  cout << "omp+tbb, MPI rank "
+       << mpi_rank << "/" << mpi_size
+       << ", number of threads = " << nr_threads << endl;
 
-  // NOTE: Use a concurrent map during the parallel phase to allow
-  // thread-safe inserts from multiple OpenMP threads.
-  tbb::concurrent_unordered_map<string, string> concurrent_bpe(bpeTokVec.size());
+  tbb::concurrent_unordered_map<string, string> concurrent_bpe(
+      (end > begin) ? (end - begin) : 0);
 
   #pragma omp parallel for
-  for (size_t w = 0; w < bpeTokVec.size(); w++) {
+  for (size_t w = begin; w < end; w++) {
     auto &x = bpeTokVec[w];
     auto str = process_bpe(x.second, codes, reversed_codes, vocab);
-
-    // NOTE: concurrent_unordered_map is thread-safe for concurrent writes.
-    // We use std::move to avoid an extra copy of the potentially large string.
     concurrent_bpe[x.first] = std::move(str);
   }
 
-  // NOTE: outputText expects a std::unordered_map<string,string>&,
-  // so we convert the concurrent container into a regular unordered_map
-  // *after* the parallel region has completed.
-  unordered_map<string, string> final_bpe;
-  final_bpe.reserve(concurrent_bpe.size());
-
   for (auto &kv : concurrent_bpe) {
-    // Key type in concurrent_unordered_map is const key, so we copy the key.
-    // We can still move the value to reduce copies.
-    final_bpe.emplace(kv.first, std::move(kv.second));
+    local_bpe.emplace(kv.first, std::move(kv.second));
+  }
+
+#else
+#error "Define a parallel method (CONFIG_OMP_CRITICAL / _SINGLE_THREADED_MERGE / _TBB)"
+#endif // OMP variants
+#endif // CONFIG_OMP
+
+  t_after_bpe = chrono::steady_clock::now();
+
+  // ===== MPI gather + output =====
+#ifdef CONFIG_MPI
+
+
+  std::vector<char> sendbuf;
+  serialize_map(local_bpe, sendbuf);
+  int send_count = static_cast<int>(sendbuf.size());
+
+
+  std::vector<int> recv_counts;
+  std::vector<int> displs;
+  std::vector<char> recvbuf;
+
+  if (mpi_rank == 0) {
+    recv_counts.resize(mpi_size);
+  }
+
+  MPI_Gather(&send_count, 1, MPI_INT,
+             mpi_rank == 0 ? recv_counts.data() : nullptr, 1, MPI_INT,
+             0, comm);
+
+  int total_bytes = 0;
+  if (mpi_rank == 0) {
+    displs.resize(mpi_size);
+    displs[0] = 0;
+    for (int i = 0; i < mpi_size; ++i) {
+      total_bytes += recv_counts[i];
+      if (i > 0) {
+        displs[i] = displs[i - 1] + recv_counts[i - 1];
+      }
+    }
+    recvbuf.resize(total_bytes);
   }
 
 
-#else
-#error "Define a parallel method"
-#endif
-#endif
+  MPI_Gatherv(sendbuf.data(), send_count, MPI_BYTE,
+              mpi_rank == 0 ? recvbuf.data()   : nullptr,
+              mpi_rank == 0 ? recv_counts.data(): nullptr,
+              mpi_rank == 0 ? displs.data()    : nullptr,
+              MPI_BYTE,
+              0, comm);
+
+  if (mpi_rank == 0) {
+    unordered_map<string, string> final_bpe;
+    final_bpe.reserve(bpeTokVec.size());
 
 
-  // output
-#if CONFIG_MPI
-  outputText(outputFile, inputFile, final_bpe);
-  if (world.rank() == 0) {
-    auto end = chrono::steady_clock::now();
-    auto duration = chrono::duration_cast<std::chrono::microseconds>(end - start);
-    double bw = (double) sz / (double) duration.count() * 1e6f;
-    cout << "Time spent = " << duration.count() << "ms" << endl;
-    cout << "Bandwidth = " << bw << " B/sec, " << bw / pow(2,20) << "MB/sec" << endl;
+    for (int r = 0; r < mpi_size; ++r) {
+      int offset = displs[r];
+      int len    = recv_counts[r];
+      if (len <= 0) continue;
+      deserialize_map_segment(
+        recvbuf.data() + offset,
+        static_cast<std::size_t>(len),
+        final_bpe);
+    }
+
+    outputText(outputFile, inputFile, final_bpe);
   }
+
+  t_after_output = chrono::steady_clock::now();
+
+#else  // No MPI：local_bpe is final_bpe
+
+  {
+    unordered_map<string, string> &final_bpe = local_bpe;
+    outputText(outputFile, inputFile, final_bpe);
+  }
+  t_after_output = chrono::steady_clock::now();
+
+#endif // CONFIG_MPI
+
+  // ===== time and bandwith=====
+  using us = chrono::microseconds;
+
+  double dt_vocab_local  = chrono::duration_cast<us>(t_after_vocab  - start).count();
+  double dt_codes_local  = chrono::duration_cast<us>(t_after_codes  - t_after_vocab).count();
+  double dt_read_local   = chrono::duration_cast<us>(t_after_read   - t_after_codes).count();
+  double dt_token_local  = chrono::duration_cast<us>(t_after_token  - t_after_read).count();
+  double dt_bpe_local    = chrono::duration_cast<us>(t_after_bpe    - t_after_token).count();
+  double dt_output_local = chrono::duration_cast<us>(t_after_output - t_after_bpe).count();
+  double dt_total_local  = chrono::duration_cast<us>(t_after_output - start).count();
+
+  auto safe_bw = [](unsigned long bytes, double us) {
+    if (us <= 0.0) return 0.0;
+    return (double)bytes / us * 1e6; // B/s
+  };
+
+#ifdef CONFIG_MPI
+  double dt_vocab_max  = 0, dt_codes_max  = 0, dt_read_max   = 0;
+  double dt_token_max  = 0, dt_bpe_max    = 0, dt_output_max = 0;
+  double dt_total_max  = 0;
+
+  MPI_Reduce(&dt_vocab_local,  &dt_vocab_max,  1, MPI_DOUBLE, MPI_MAX, 0, comm);
+  MPI_Reduce(&dt_codes_local,  &dt_codes_max,  1, MPI_DOUBLE, MPI_MAX, 0, comm);
+  MPI_Reduce(&dt_read_local,   &dt_read_max,   1, MPI_DOUBLE, MPI_MAX, 0, comm);
+  MPI_Reduce(&dt_token_local,  &dt_token_max,  1, MPI_DOUBLE, MPI_MAX, 0, comm);
+  MPI_Reduce(&dt_bpe_local,    &dt_bpe_max,    1, MPI_DOUBLE, MPI_MAX, 0, comm);
+  MPI_Reduce(&dt_output_local, &dt_output_max, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
+  MPI_Reduce(&dt_total_local,  &dt_total_max,  1, MPI_DOUBLE, MPI_MAX, 0, comm);
+
+  if (mpi_rank == 0) {
+    double bw_read   = safe_bw(sz, dt_read_max);
+    double bw_bpe    = safe_bw(sz, dt_bpe_max);
+    double bw_output = safe_bw(sz, dt_output_max);
+    double bw_total  = safe_bw(sz, dt_total_max);
+
+    cout << "===== Timing (MPI, max across ranks, Nprocs="
+         << mpi_size << ") =====" << endl;
+    cout << "readVocab:      " << dt_vocab_max  / 1e3 << " ms" << endl;
+    cout << "readCodes:      " << dt_codes_max  / 1e3 << " ms" << endl;
+    cout << "readText:       " << dt_read_max   / 1e3 << " ms, BW ~= "
+         << bw_read  / (1024.0*1024.0) << " MB/s" << endl;
+    cout << "tokenize:       " << dt_token_max  / 1e3 << " ms" << endl;
+    cout << "BPE compute:    " << dt_bpe_max    / 1e3 << " ms, BW ~= "
+         << bw_bpe   / (1024.0*1024.0) << " MB/s" << endl;
+    cout << "gather+output:  " << dt_output_max / 1e3 << " ms, BW ~= "
+         << bw_output / (1024.0*1024.0) << " MB/s" << endl;
+    cout << "-----------------------------------------" << endl;
+    cout << "Total:          " << dt_total_max  / 1e3 << " ms, BW ~= "
+         << bw_total / (1024.0*1024.0) << " MB/s" << endl;
+  }
+
 #else
-  outputText(outputFile, inputFile, final_bpe);
-  auto end = chrono::steady_clock::now();
-  auto duration = chrono::duration_cast<std::chrono::microseconds>(end - start);
-  double bw = (double) sz / (double) duration.count() * 1e6f;
-  cout << "Time spent = " << duration.count() << "ms" << endl;
-  cout << "Bandwidth = " << bw << " B/sec, " << bw / pow(2,20) << "MB/sec" << endl;
+  double bw_read   = safe_bw(sz, dt_read_local);
+  double bw_bpe    = safe_bw(sz, dt_bpe_local);
+  double bw_output = safe_bw(sz, dt_output_local);
+  double bw_total  = safe_bw(sz, dt_total_local);
+
+  cout << "===== Timing (single process) =====" << endl;
+  cout << "readVocab:      " << dt_vocab_local  / 1e3 << " ms" << endl;
+  cout << "readCodes:      " << dt_codes_local  / 1e3 << " ms" << endl;
+  cout << "readText:       " << dt_read_local   / 1e3 << " ms, BW ~= "
+       << bw_read  / (1024.0*1024.0) << " MB/s" << endl;
+  cout << "tokenize:       " << dt_token_local  / 1e3 << " ms" << endl;
+  cout << "BPE compute:    " << dt_bpe_local    / 1e3 << " ms, BW ~= "
+       << bw_bpe   / (1024.0*1024.0) << " MB/s" << endl;
+  cout << "outputText:     " << dt_output_local / 1e3 << " ms, BW ~= "
+       << bw_output / (1024.0*1024.0) << " MB/s" << endl;
+  cout << "-----------------------------------" << endl;
+  cout << "Total:          " << dt_total_local  / 1e3 << " ms, BW ~= "
+       << bw_total / (1024.0*1024.0) << " MB/s" << endl;
 #endif
 }
+
 
 
 class BPEApplyer {
