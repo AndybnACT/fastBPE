@@ -1,4 +1,7 @@
 #include "fastBPE.hpp"
+#include <mpi.h>
+#include <iostream>
+
 
 using namespace std;
 using namespace fastBPE;
@@ -18,6 +21,17 @@ void printUsage() {
 
 
 int main(int argc, char **argv) {
+#ifdef CONFIG_MPI
+    MPI_Init(&argc, &argv);
+
+    int rank = 0, size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    std::cout << "MPI initialized, I am process "
+              << rank << " of " << size << "." << std::endl;
+#endif
+
   if (argc < 2) {
     printUsage();
     exit(EXIT_FAILURE);
@@ -40,4 +54,9 @@ int main(int argc, char **argv) {
     exit(EXIT_FAILURE);
   }
   return 0;
+
+#ifdef CONFIG_MPI
+    MPI_Finalize();
+#endif
+    return 0;    
 }
