@@ -223,14 +223,9 @@ void outputText(const char *fpo, const char *fp,
 #if CONFIG_OMP
 
 std::pair<size_t, uint64_t> output_or_count(
-  _hash_map<string, string> &bpe, size_t size, char *f, char *fo
+  _hash_map<string, string> &bpe, size_t size, char *f, vector<char> *allbuf
 ) {
-  size_t charOut = 0;
-  uint64_t total = 0;
-  /*
-   * We don't need fo_off here if we use mpi. Instead, we accumulate locally and gather to the writing thread's mmap buffer.
-   */
-  static vector<size_t> fo_off(kThreads); // It's very ugly but it's already rotten before we got here so..
+  uint64_t sz = 0, total = 0;
   vector<size_t> boundary(kThreads + 1);
 
   boundary[0] = 0;
@@ -248,47 +243,89 @@ std::pair<size_t, uint64_t> output_or_count(
     boundary[i] = start + 1 >= size ? size : start + 1;
   }
 
-  #pragma omp parallel reduction(+:total)
+  #pragma omp parallel reduction(+:sz, total)
   {
     string cur_word;
     size_t id = omp_get_thread_num();
-    size_t out = 0;
-
-    if (fo != nullptr && id != 0)
-      out = fo_off[id - 1];
+    vector<char> *buf = &allbuf[id];
 
     for (size_t i = boundary[id]; i < boundary[id + 1]; i++) {
       auto &cur_char = f[i];
       if (cur_char == ' ' || cur_char == '\n') {
         if (cur_word.size() == 0) {
-          if (fo != nullptr) fo[out] = cur_char;
-          out++;
+          buf->push_back(cur_char);
+	  sz++;
           continue;
         }
         // end of word : write bpe to output
         auto it = bpe.find(cur_word);
         assert(it != bpe.end());
         for (auto x : it->second) {
-          if (fo != nullptr) fo[out] = x;
-          out++;
+          buf->push_back(x);
+	  sz++;
         }
-        if (fo != nullptr) fo[out] = cur_char;
-        out++;
+        buf->push_back(cur_char);
+	sz++;
+
         total++;
         cur_word.clear();
       } else {
         cur_word.push_back(cur_char);
       }
     }
-    if (fo == nullptr)
-      fo_off[id] = out;
   }
 
-  for (auto x: fo_off)
-    charOut += x;
-
-  return std::make_pair(charOut, total);
+  return std::make_pair(sz, total);
 }
+
+void outputText(const char *fpo, const char *fp,
+                _hash_map<string, string> &bpe) {
+
+  int fd = safeOpen(fp, O_RDONLY);
+  auto fdOut = safeOpen(fpo, O_RDWR | O_CREAT | O_TRUNC, 0666);
+
+  struct stat s;
+  fstat(fd, &s);
+
+  fprintf(stderr, "Applying BPE to %s (Parallelized) ...\n", fp);
+  auto size = s.st_size;
+  char *f = (char *)mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+  vector<char> allbuf[kThreads];
+  vector<size_t> off(kThreads);
+
+  auto p = output_or_count(bpe, size, f, allbuf);
+  size_t out_size = p.first;
+
+  if (ftruncate(fdOut, out_size) < 0) {
+    fprintf(stderr, "Couldn't truncate output file %s to size %lu\n", fpo,
+            out_size);
+    exit(EXIT_FAILURE);
+  }
+
+  off[0] = 0;
+  for (int i = 1; i < kThreads; i++) {
+    off[i] = allbuf[i - 1].size() + off[i - 1];
+  }
+
+
+  char *fo = (char *)mmap(NULL, out_size, PROT_WRITE, MAP_SHARED, fdOut, 0);
+  if (fo == MAP_FAILED) {
+    fprintf(stderr, "Output memory map failed : %d.\n", errno);
+    exit(EXIT_FAILURE);
+  }
+
+//  #pragma omp parallel for // not helping, should avoid data movement
+  for (int i = 0; i < kThreads; i++) {
+    memcpy(fo+off[i], allbuf[i].data(), allbuf[i].size());
+  }
+
+  fprintf(stderr, "Modified %lu words from text file.\n", p.second);
+  munmap(fo, out_size);
+  munmap(f, size);
+  close(fdOut);
+  close(fd);
+}
+
 #else /* !CONFIG_OMP */
 
 std::pair<size_t, uint64_t> output_or_count(
@@ -324,8 +361,6 @@ std::pair<size_t, uint64_t> output_or_count(
   }
   return std::make_pair(charOut, total);
 }
-
-#endif /* CONFIG_OMP */
 
 void outputText(const char *fpo, const char *fp,
                 _hash_map<string, string> &bpe) {
@@ -363,6 +398,7 @@ void outputText(const char *fpo, const char *fp,
   close(fd);
 }
 
+#endif /* CONFIG_OMP */
 #endif /* CONFIG_MPI */
 
 struct pair_hash {
