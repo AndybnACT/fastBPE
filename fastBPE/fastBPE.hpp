@@ -526,12 +526,44 @@ void tokenize(const _hash_map<string, uint32_t> &word_count,
   }
 }
 
+#ifdef CONFIG_OMP_TBB
 void tokenize_str(const _hash_map<string, uint32_t> &word_count,
                   _hash_map<string, vector<string>> &words) {
-#ifdef CONFIG_OMP_TBB
-//  #pragma omp parallel for
+
+  vector<pair<string, uint32_t>> kvs;
+  kvs.reserve(word_count.size());
+  for (auto &kv : word_count) {
+    kvs.emplace_back(kv);
+  }
+
+  #pragma omp parallel for
+  for (int i = 0; i < kvs.size(); i++) {
+    auto &x = kvs[i];
+    auto &word = x.first;
+    words[word] = vector<string>();
+
+    int pos = 0, realLength = 0;
+    int lastStart = 0;
+    while (word[pos]) {
+      bool newChar = (word[pos] & 0xc0) != 0x80; // not a continuation byte
+      realLength += newChar;
+      // new token
+      if (newChar && pos > 0) {
+        auto new_token = word.substr(lastStart, pos - lastStart);
+        words[word].push_back(new_token);
+        lastStart = pos;
+      }
+      pos++;
+    }
+    auto new_token = word.substr(lastStart, string::npos) + kEndWord;
+    words[word].push_back(new_token);
+  }
+}
+
 #else
-#endif
+
+void tokenize_str(const _hash_map<string, uint32_t> &word_count,
+                  _hash_map<string, vector<string>> &words) {
   for (auto &x : word_count) {
     auto &word = x.first;
     words[word] = vector<string>();
@@ -553,6 +585,7 @@ void tokenize_str(const _hash_map<string, uint32_t> &word_count,
     words[word].push_back(new_token);
   }
 }
+#endif
 
 using tp = pair<uint32_t, uint32_t>;
 using tps = pair<string, string>;
