@@ -1157,6 +1157,7 @@ void applybpe(const char *outputFile, const char *inputFile,
 
   outputText((string(outputFile) + "." + to_string(world.rank())).c_str(),
              (string(inputFile) + "." + to_string(world.rank())).c_str(), final_bpe);
+  world.barrier();
   if (world.rank() == 0) {
     auto end = chrono::steady_clock::now();
     auto duration = chrono::duration_cast<std::chrono::microseconds>(end - start);
