@@ -183,120 +183,6 @@ size_t readText(const char *fp, _hash_map<string, uint32_t> &word_count) {
 }
 #endif
 
-#if defined(CONFIG_MPI)
-
-std::pair<size_t, uint64_t> output_or_count(
-  _hash_map<string, string> &bpe, size_t size, char *f, vector<char> &buf
-) {
-  string cur_word;
-  uint64_t total = 0;
-  
-  mpi::communicator world;
-  vector<size_t> boundary(world.size() + 1);
-
-  boundary[0] = 0;
-  boundary[world.size()] = size;
-  for (size_t i = 1; i < world.size(); i++) {
-    size_t start = (size / world.size()) * i;
-    while (f[start] != ' ' && f[start] != '\n') {
-      start++;
-      if (start >= size) {
-        fprintf(stderr, "error dividing works for output for #%zu, reaching the end\n", i);
-	start = size;
-	break;
-      }
-    }
-    boundary[i] = start + 1 >= size ? size : start + 1;
-  }
-
-  for (size_t i = boundary[world.rank()]; i < boundary[world.rank() + 1]; i++) {
-    auto &cur_char = f[i];
-    if (cur_char == ' ' || cur_char == '\n') {
-      if (cur_word.size() == 0) {
-        buf.push_back(cur_char);
-        continue;
-      }
-      // end of word : write bpe to output
-      auto it = bpe.find(cur_word);
-      assert(it != bpe.end());
-      for (auto x : it->second) {
-        buf.push_back(x);
-      }
-      buf.push_back(cur_char);
-
-      total++;
-      cur_word.clear();
-    } else {
-      cur_word.push_back(cur_char);
-    }
-  }
-  return std::make_pair(buf.size(), total);
-}
-
-void outputText(const char *fpo, const char *fp,
-                _hash_map<string, string> &bpe) {
-  mpi::communicator world;
-  int fd = safeOpen(fp, O_RDONLY);
-  int  fdOut;
-  if (world.rank() == 0)
-    fdOut = safeOpen(fpo, O_RDWR | O_CREAT | O_TRUNC, 0666);
-
-  struct stat s;
-  fstat(fd, &s);
-
-  fprintf(stderr, "Applying BPE to %s ...\n", fp);
-  auto size = s.st_size;
-  char *f = (char *)mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
-  vector<char> localbuf;
-
-  auto p = output_or_count(bpe, size, f, localbuf);
-  size_t out_size = 0;
-  vector <size_t> out_sizes(world.size());
-  vector <size_t> out_offs(world.size());
-  vector <int> disps(world.size());
-  vector <int> szs(world.size());
-  MPI_File fh;
-  MPI_Status status;
-  int ierr;
-
-
-  // cout << "rank " << world.rank() << "has size = " << p.first << endl;
-  reduce(world, p.first, out_size, plus<size_t>(), 0);
-  if (world.rank() == 0 && ftruncate(fdOut, out_size) < 0) {
-    fprintf(stderr, "Couldn't truncate output file %s to size %lu\n", fpo,
-            out_size);
-    exit(EXIT_FAILURE);
-  }
-
-  for (int i = 0 ; i < world.size(); i++) {
-    disps[i] = i;
-    szs[i] = 1;
-  }
-  all_gather(world, p.first, out_sizes);
-  for (int i = 1; i < world.size(); i ++ ) {
-    out_offs[i] = out_offs[i - 1] + out_sizes[i - 1];
-  }
-
-  ierr = MPI_File_open(MPI_COMM_WORLD, fpo,
-                       MPI_MODE_CREATE | MPI_MODE_WRONLY,
-                       MPI_INFO_NULL, &fh);
-  if (ierr != MPI_SUCCESS) {
-      fprintf(stderr, "Error opening file on rank %d\n", world.rank());
-      MPI_Abort(MPI_COMM_WORLD, ierr);
-  }
-
-  // cout << "rank " << world.rank() << "has offset = " << out_offs[world.rank()] << endl;
-
-  MPI_File_write_at_all(fh, out_offs[world.rank()],
-		        localbuf.data(), p.first, MPI_CHAR, &status);
-
-  MPI_File_close(&fh);
-  munmap(f, size);
-  close(fd);
-}
-
-#else /* !CONFIG_MPI */
-
 #if CONFIG_OMP
 
 std::pair<size_t, uint64_t> output_or_count(
@@ -476,7 +362,6 @@ void outputText(const char *fpo, const char *fp,
 }
 
 #endif /* CONFIG_OMP */
-#endif /* CONFIG_MPI */
 
 struct pair_hash {
   template <class T1, class T2> size_t operator()(const pair<T1, T2> &p) const {
@@ -1149,7 +1034,6 @@ void applybpe(const char *outputFile, const char *inputFile,
   // apply BPE codes to each word
 
 #ifndef CONFIG_OMP
-#ifndef CONFIG_MPI
   cout << "Spawning " << kThreads << "threads" << endl;
   _hash_map<string, string> bpe[kThreads];
   vector<thread> threads;
@@ -1172,26 +1056,6 @@ void applybpe(const char *outputFile, const char *inputFile,
       final_bpe[x.first] = x.second;
     }
   }
-#else /* CONFIG_MPI */
-  mpi::communicator world;
-  _hash_map<string, string> bpe;
-
-  for (size_t w = world.rank(); w < bpeTokVec.size(); w += world.size()) {
-    auto &x = bpeTokVec[w];
-    bpe[x.first] = process_bpe(x.second, codes, reversed_codes, vocab);
-  }
-
-  vector<_hash_map<string, string>> all_bpe;
-  _hash_map<string, string> final_bpe;
-
-  all_gather(world, bpe, all_bpe);
-
-  for (size_t i = 0; i < world.size(); i++) {
-    for (auto x : all_bpe[i]) {
-      final_bpe[x.first] = x.second;
-    }
-  }
-#endif
 #else /* CONFIG_OMP  */
 #if defined(CONFIG_OMP_CRITICAL)
   cout << "omp critical region, number of threads = " << nr_threads << endl;
@@ -1239,8 +1103,6 @@ void applybpe(const char *outputFile, const char *inputFile,
 #endif
 
   // output
-#if CONFIG_MPI
-  outputText(outputFile, inputFile, final_bpe);
   if (world.rank() == 0) {
     auto end = chrono::steady_clock::now();
     auto duration = chrono::duration_cast<std::chrono::microseconds>(end - start);
@@ -1248,14 +1110,12 @@ void applybpe(const char *outputFile, const char *inputFile,
     cout << "Time spent = " << duration.count() << "ms" << endl;
     cout << "Bandwidth = " << bw << " B/sec, " << bw / pow(2,20) << "MB/sec" << endl;
   }
-#else
   outputText(outputFile, inputFile, final_bpe);
   auto end = chrono::steady_clock::now();
   auto duration = chrono::duration_cast<std::chrono::microseconds>(end - start);
   double bw = (double) sz / (double) duration.count() * 1e6f;
   cout << "Time spent = " << duration.count() << "ms" << endl;
   cout << "Bandwidth = " << bw << " B/sec, " << bw / pow(2,20) << "MB/sec" << endl;
-#endif
 }
 
 
