@@ -112,7 +112,6 @@ static void serialize_word_count(
     }
 }
 
-// 反序列化到 word_count
 static void deserialize_word_count(
     const char *data, std::size_t len,
     std::unordered_map<std::string, uint32_t> &out)
@@ -212,52 +211,319 @@ int safeOpen(const char *file_path, int flags, mode_t mode = 0) {
   return fd;
 }
 
-size_t readText(const char *fp, unordered_map<string, uint32_t> &word_count) {
-  string cur_word;
+vector<size_t> get_boundary(char *f, size_t size, size_t nr_threads)
+{
+  vector<size_t> boundary(nr_threads + 1);
+
+  boundary[0] = 0;
+  boundary[nr_threads] = size;
+  for (size_t i = 1; i < nr_threads; i++) {
+    size_t start = (size / nr_threads) * i;
+    while (f[start] != ' ' && f[start] != '\n') {
+      start++;
+      if (start >= size) {
+        fprintf(stderr, "error dividing works for output for #%zu, reaching the end\n", i);
+	start = size;
+	break;
+      }
+    }
+    boundary[i] = start + 1 >= size ? size : start + 1;
+  }
+  return boundary;
+}
+
+size_t readText(const char *fp, _hash_map<std::string, uint32_t> &word_count) {
+  using namespace std;
+
+  word_count.clear();
+  string cur;
   uint64_t total = 0;
   size_t sz = 0;
-  auto deal_with_char = [&](char cur_char){
+
+  auto handle_char = [] (char cur_char,
+                         std::string &cur_word,
+                         _hash_map<std::string, uint32_t> &wc,
+                         uint64_t &tot) {
     if (cur_char == ' ' || cur_char == '\n') {
-      if (cur_word.size() == 0)
+      if (cur_word.empty())
         return;
-      // end of word
-      auto it = word_count.find(cur_word);
-      int count = it != word_count.end() ? it->second : 0;
-      word_count[cur_word] = count + 1;
-      total++;
+      wc[cur_word] += 1;
+      ++tot;
       cur_word.clear();
     } else {
       cur_word.push_back(cur_char);
     }
   };
 
-  if (string(fp).compare("-") == 0) {
+  if (string(fp) == "-") {
     for (std::string line; std::getline(std::cin, line);) {
-      for(char c: line){
-        deal_with_char(c);
+      for (char c : line) {
+        handle_char(c, cur, word_count, total);
       }
-      deal_with_char('\n');
+      handle_char('\n', cur, word_count, total);
+    }
+    return 0;  
+  }
+
+  int fd = safeOpen(fp, O_RDONLY);
+
+  struct stat s;
+  if (fstat(fd, &s) < 0) {
+    fprintf(stderr, "fstat failed on %s\n", fp);
+    exit(EXIT_FAILURE);
+  }
+
+  size_t size = static_cast<size_t>(s.st_size);
+  sz = size;
+
+  char *f = (char *)mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+  if (f == MAP_FAILED) {
+    fprintf(stderr, "Input memory map failed : %d.\n", errno);
+    close(fd);
+    exit(EXIT_FAILURE);
+  }
+
+#ifdef CONFIG_OMP
+  int nr_threads = 1;
+  #pragma omp parallel
+  {
+    if (omp_get_thread_num() == 0) {
+      nr_threads = omp_get_num_threads();
     }
   }
-  else {
-    int fd = safeOpen(fp, O_RDONLY);
 
-    struct stat s;
-    fstat(fd, &s);
-    fprintf(stderr, "Loading vocabulary from %s ...\n", fp);
+  std::vector<size_t> boundary = get_boundary(f, size, nr_threads);
 
-    size_t size = s.st_size;
-    char *f = (char *)mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+  std::vector<std::unordered_map<std::string, uint32_t>> local_wc(nr_threads);
+  std::vector<uint64_t> local_tot(nr_threads, 0);
 
-    for (size_t i = 0; i < size; i++) {
-      deal_with_char(f[i]);
+  #pragma omp parallel for schedule(static)
+  for (int t = 0; t < nr_threads; ++t) {
+    std::string cur_word;
+    auto &wc  = local_wc[t];
+    auto &tot = local_tot[t];
+
+    size_t begin = boundary[t];
+    size_t end   = boundary[t + 1];
+
+    for (size_t i = begin; i < end; ++i) {
+      char c = f[i];
+      handle_char(c, cur_word, wc, tot);
     }
-    sz = size;
+
+    if (!cur_word.empty()) {
+      wc[cur_word] += 1;
+      ++tot;
+      cur_word.clear();
+    }
   }
-  fprintf(stderr, "Read %lu words (%lu unique) from text file.\n", total,
-          word_count.size());
+
+  for (int t = 0; t < nr_threads; ++t) {
+    for (auto &kv : local_wc[t]) {
+      word_count[kv.first] += kv.second;
+    }
+    total += local_tot[t];
+  }
+
+#else
+  for (size_t i = 0; i < size; ++i) {
+    char c = f[i];
+    handle_char(c, cur, word_count, total);
+  }
+  if (!cur.empty()) {
+    word_count[cur] += 1;
+    ++total;
+    cur.clear();
+  }
+#endif
+
+  munmap(f, size);
+  close(fd);
+
   return sz;
 }
+
+#ifdef CONFIG_MPI
+size_t readText_mpi_parallel(const char *fp,
+                             std::unordered_map<std::string, uint32_t> &word_count,
+                             MPI_Comm comm)
+{
+    using namespace std;
+
+    int rank = 0, nprocs = 1;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &nprocs);
+
+    if (std::string(fp) == "-") {
+        if (rank == 0) {
+            fprintf(stderr, "readText_mpi_parallel: stdin ('-') not supported in MPI mode.\n");
+        }
+        MPI_Abort(comm, 1);
+    }
+
+    size_t filesize = 0;
+    std::vector<size_t> boundaries;
+
+    // ===== rank 0: get the file size + use mmap + get_boundary to get MPI boundary =====
+    if (rank == 0) {
+        int fd = safeOpen(fp, O_RDONLY);
+
+        struct stat s;
+        if (fstat(fd, &s) < 0) {
+            fprintf(stderr, "fstat failed on %s\n", fp);
+            exit(EXIT_FAILURE);
+        }
+
+        filesize = static_cast<size_t>(s.st_size);
+
+        char *f = (char *)mmap(NULL, filesize, PROT_READ, MAP_PRIVATE, fd, 0);
+        if (f == MAP_FAILED) {
+            fprintf(stderr, "Input memory map failed on %s : %d\n", fp, errno);
+            close(fd);
+            exit(EXIT_FAILURE);
+        }
+
+        boundaries = get_boundary(f, filesize, nprocs);
+
+        munmap(f, filesize);
+        close(fd);
+    }
+
+    // filesize
+    MPI_Bcast(&filesize, 1, MPI_UNSIGNED_LONG, 0, comm);
+
+    // boundaries[nprocs+1]
+    if (rank != 0) {
+        boundaries.resize(nprocs + 1);
+    }
+    MPI_Bcast(boundaries.data(),
+              static_cast<int>(nprocs + 1),
+              MPI_UNSIGNED_LONG,
+              0, comm);
+
+
+    size_t begin = boundaries[rank];
+    size_t end   = boundaries[rank + 1];
+    if (begin > end) begin = end;
+    size_t chunk_size = end - begin;
+
+    // =====  rank：pread its own chunk  =====
+    std::unordered_map<std::string, uint32_t> local_wc;
+    uint64_t local_total = 0;
+
+    auto handle_char = [] (char cur_char,
+                           std::string &cur_word,
+                           std::unordered_map<std::string, uint32_t> &wc,
+                           uint64_t &tot) {
+        if (cur_char == ' ' || cur_char == '\n') {
+            if (cur_word.empty())
+                return;
+            wc[cur_word] += 1;
+            ++tot;
+            cur_word.clear();
+        } else {
+            cur_word.push_back(cur_char);
+        }
+    };
+
+    if (chunk_size > 0) {
+        int fd = safeOpen(fp, O_RDONLY);
+
+        std::vector<char> buf(chunk_size);
+        size_t to_read  = chunk_size;
+        size_t offset   = 0;
+        while (to_read > 0) {
+            ssize_t n = pread(fd, buf.data() + offset, to_read,
+                              static_cast<off_t>(begin + offset));
+            if (n < 0) {
+                fprintf(stderr, "pread failed on %s : %d\n", fp, errno);
+                close(fd);
+                MPI_Abort(comm, 1);
+            }
+            if (n == 0) {
+                // unexpected EOF
+                break;
+            }
+            offset  += static_cast<size_t>(n);
+            to_read -= static_cast<size_t>(n);
+        }
+
+        close(fd);
+
+        std::string cur_word;
+        for (size_t i = 0; i < offset; ++i) {
+            char c = buf[i];
+            handle_char(c, cur_word, local_wc, local_total);
+        }
+
+        if (!cur_word.empty()) {
+            local_wc[cur_word] += 1;
+            ++local_total;
+            cur_word.clear();
+        }
+    }
+
+    // ===== rank 0 收集并合并所有 rank 的 local_wc =====
+    std::vector<char> sendbuf;
+    serialize_word_count(local_wc, sendbuf);
+    std::uint64_t send_size = static_cast<std::uint64_t>(sendbuf.size());
+
+    std::vector<std::uint64_t> recv_sizes;
+    if (rank == 0) {
+        recv_sizes.resize(nprocs);
+    }
+
+    MPI_Gather(&send_size, 1, MPI_UINT64_T,
+               rank == 0 ? recv_sizes.data() : nullptr, 1, MPI_UINT64_T,
+               0, comm);
+
+    std::vector<int> recvcounts;
+    std::vector<int> displs;
+    std::vector<char> recvbuf;
+
+    if (rank == 0) {
+        recvcounts.resize(nprocs);
+        displs.resize(nprocs);
+
+        std::size_t total_bytes = 0;
+        for (int i = 0; i < nprocs; ++i) {
+            recvcounts[i] = static_cast<int>(recv_sizes[i]);
+            displs[i]     = static_cast<int>(total_bytes);
+            total_bytes  += recv_sizes[i];
+        }
+        recvbuf.resize(total_bytes);
+    }
+
+    MPI_Gatherv(sendbuf.data(),
+                static_cast<int>(send_size),
+                MPI_BYTE,
+                rank == 0 ? recvbuf.data()   : nullptr,
+                rank == 0 ? recvcounts.data(): nullptr,
+                rank == 0 ? displs.data()    : nullptr,
+                MPI_BYTE,
+                0, comm);
+
+    if (rank == 0) {
+        word_count.clear();
+        std::unordered_map<std::string, uint32_t> tmp;
+
+        for (int i = 0; i < nprocs; ++i) {
+            const char *ptr = recvbuf.data() + displs[i];
+            std::size_t len = static_cast<std::size_t>(recv_sizes[i]);
+
+            deserialize_word_count(ptr, len, tmp);
+            for (auto &kv : tmp) {
+                word_count[kv.first] += kv.second;
+            }
+        }
+    }
+
+    // 所有 rank 返回同样的 filesize（rank != 0 的 word_count 暂时没用）
+    return filesize;
+}
+#endif // CONFIG_MPI
+
+
 
 std::pair<size_t, uint64_t> output_or_count(
     const std::unordered_map<std::string, std::string> &bpe,
@@ -1021,19 +1287,15 @@ void applybpe(const char *outputFile, const char *inputFile,
   MPI_Comm_size(comm, &mpi_size);
 #endif
 
-  // ===== READ input=====
-  std::unordered_map<std::string, uint32_t> word_count;
+// ===== READ input=====
+std::unordered_map<std::string, uint32_t> word_count;
 
 #ifdef CONFIG_MPI
-  if (mpi_rank == 0) {
-    sz = readText(inputFile, word_count);
-  }
-
-  MPI_Bcast(&sz, 1, MPI_UNSIGNED_LONG, 0, comm);
+  sz = fastBPE::readText_mpi_parallel(inputFile, word_count, comm);
 
   std::vector<char> wc_buffer;
   if (mpi_rank == 0) {
-    serialize_word_count(word_count, wc_buffer); 
+    serialize_word_count(word_count, wc_buffer);
   }
 
   std::uint64_t wc_size = (mpi_rank == 0)
@@ -1053,9 +1315,9 @@ void applybpe(const char *outputFile, const char *inputFile,
   }
 
 #else
-  // None MPI
   sz = readText(inputFile, word_count);
 #endif
+
 
   t_after_read = std::chrono::steady_clock::now();
 
