@@ -59,11 +59,32 @@ int safeOpen(const char *file_path, int flags, mode_t mode = 0) {
   return fd;
 }
 
+vector<size_t> get_boundary(char *f, size_t size, size_t nr_threads)
+{
+  vector<size_t> boundary(nr_threads + 1);
+
+  boundary[0] = 0;
+  boundary[nr_threads] = size;
+  for (size_t i = 1; i < nr_threads; i++) {
+    size_t start = (size / nr_threads) * i;
+    while (f[start] != ' ' && f[start] != '\n') {
+      start++;
+      if (start >= size) {
+        fprintf(stderr, "error dividing works for output for #%zu, reaching the end\n", i);
+	start = size;
+	break;
+      }
+    }
+    boundary[i] = start + 1 >= size ? size : start + 1;
+  }
+  return boundary;
+}
+
 size_t readText(const char *fp, _hash_map<string, uint32_t> &word_count) {
-  string cur_word;
+  string cur;
   uint64_t total = 0;
   size_t sz = 0;
-  auto deal_with_char = [&](char cur_char){
+  auto deal_with_char = [&](char cur_char, string &cur_word){
     if (cur_char == ' ' || cur_char == '\n') {
       if (cur_word.size() == 0)
         return;
@@ -81,9 +102,9 @@ size_t readText(const char *fp, _hash_map<string, uint32_t> &word_count) {
   if (string(fp).compare("-") == 0) {
     for (std::string line; std::getline(std::cin, line);) {
       for(char c: line){
-        deal_with_char(c);
+        deal_with_char(c, cur);
       }
-      deal_with_char('\n');
+      deal_with_char('\n', cur);
     }
   }
   else {
@@ -96,9 +117,27 @@ size_t readText(const char *fp, _hash_map<string, uint32_t> &word_count) {
     size_t size = s.st_size;
     char *f = (char *)mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
 
-    for (size_t i = 0; i < size; i++) {
-      deal_with_char(f[i]);
+
+#if defined(CONFIG_OMP_TBB)
+    vector<size_t> boundary = get_boundary(f, size, kThreads);
+//    for (int i = 0; i < kThreads; i++) {
+//      cout << "start of " << i << "th thread " << boundary[i] << endl;
+//    }
+    #pragma omp parallel reduction(+: total)
+    {
+      size_t id = omp_get_thread_num();
+      string local_cur;
+
+      for (size_t i = boundary[id]; i < boundary[id + 1]; i++) {
+        deal_with_char(f[i], local_cur);
+      }
     }
+#else
+    for (size_t i = 0; i < size; i++) {
+      deal_with_char(f[i], cur);
+    }
+#endif
+
     sz = size;
   }
   fprintf(stderr, "Read %lu words (%lu unique) from text file.\n", total,
@@ -998,6 +1037,18 @@ void applybpe(const char *outputFile, const char *inputFile,
   // read vocabulary (to which we want to limit the output file)
   auto start = chrono::steady_clock::now();
   unsigned long sz;
+#ifdef CONFIG_OMP
+  int nr_threads;
+  #pragma omp parallel
+  {
+    if (omp_get_thread_num() == 0) {
+      nr_threads = omp_get_num_threads();
+    }
+  }
+
+  kThreads = nr_threads;
+#endif
+
   _hash_map<string, uint32_t> vocab;
   if (strcmp(vocabPath, "") != 0) {
     readVocab(vocabPath, vocab);
@@ -1068,16 +1119,6 @@ void applybpe(const char *outputFile, const char *inputFile,
   }
 #endif
 #else /* CONFIG_OMP  */
-  int nr_threads;
-  #pragma omp parallel
-  {
-    if (omp_get_thread_num() == 0) {
-      nr_threads = omp_get_num_threads();
-    }
-  }
-
-  kThreads = nr_threads;
-
 #if defined(CONFIG_OMP_CRITICAL)
   cout << "omp critical region, number of threads = " << nr_threads << endl;
   _hash_map<string, string> final_bpe;
