@@ -991,6 +991,51 @@ string process_bpe(vector<string> &subwords,
   );
 }
 
+#ifdef CONFIG_MPI
+
+unsigned long mpi_readTexts(string inputFile, _hash_map<string, uint32_t>&word_count)
+{
+  vector<_hash_map<string, uint32_t>> global_word_count;
+  _hash_map<string, uint32_t> local_word_count;
+  mpi::communicator world;
+  unsigned long sz, sum;
+
+  sz = readText((inputFile + "." + to_string(world.rank())).c_str(), local_word_count);
+
+#ifdef CONFIG_OMP_TBB
+  vector<pair<string, uint32_t>> kvs;
+  vector<vector<pair<string, uint32_t>>> all_kvs;
+  kvs.reserve(local_word_count.size());
+  for (auto &x: local_word_count) {
+    kvs.emplace_back(x.first, x.second);
+  }
+
+  all_gather(world, kvs, all_kvs);
+
+  #pragma omp parallel for
+  for (int i = 0; i < world.size(); i++) {
+    // should serialize it for better parallelization
+    for (auto &x: all_kvs[i]) {
+      word_count[x.first] += x.second;
+    }
+  }
+
+#else /* !CONFIG_OMP_TBB */
+
+  all_gather(world, local_word_count, global_word_count);
+
+  for (int i = 0; i < world.size(); i++) {
+    for (auto &x: global_word_count[i]) {
+      word_count[x.first] += x.second;
+    }
+  }
+#endif /* CONFIG_OMP_TBB */
+  reduce(world, sz, sum, std::plus<unsigned long>(), 0);
+  return sum;
+}
+
+#endif /* CONFIG_MPI */
+
 void applybpe(const char *outputFile, const char *inputFile,
               const char *codesPath, const char *vocabPath) {
   // read vocabulary (to which we want to limit the output file)
@@ -1020,7 +1065,11 @@ void applybpe(const char *outputFile, const char *inputFile,
 
   // read input file words
   _hash_map<string, uint32_t> word_count;
+#ifdef CONFIG_MPI
+  sz = mpi_readTexts(inputFile, word_count);
+#else /* !CONFIG_MPI */
   sz = readText(inputFile, word_count);
+#endif /* CONFIG_MPI */
 
   // tokenize
   _hash_map<string, vector<string>> bpeTok;
@@ -1103,6 +1152,11 @@ void applybpe(const char *outputFile, const char *inputFile,
 #endif
 
   // output
+#ifdef CONFIG_MPI
+  mpi::communicator world;
+
+  outputText((string(outputFile) + "." + to_string(world.rank())).c_str(),
+             (string(inputFile) + "." + to_string(world.rank())).c_str(), final_bpe);
   if (world.rank() == 0) {
     auto end = chrono::steady_clock::now();
     auto duration = chrono::duration_cast<std::chrono::microseconds>(end - start);
@@ -1110,12 +1164,14 @@ void applybpe(const char *outputFile, const char *inputFile,
     cout << "Time spent = " << duration.count() << "ms" << endl;
     cout << "Bandwidth = " << bw << " B/sec, " << bw / pow(2,20) << "MB/sec" << endl;
   }
+#else /* !CONFIG_MPI  */
   outputText(outputFile, inputFile, final_bpe);
   auto end = chrono::steady_clock::now();
   auto duration = chrono::duration_cast<std::chrono::microseconds>(end - start);
   double bw = (double) sz / (double) duration.count() * 1e6f;
   cout << "Time spent = " << duration.count() << "ms" << endl;
   cout << "Bandwidth = " << bw << " B/sec, " << bw / pow(2,20) << "MB/sec" << endl;
+#endif /* CONFIG_MPI  */
 }
 
 
