@@ -80,6 +80,60 @@ vector<size_t> get_boundary(char *f, size_t size, size_t nr_threads)
   return boundary;
 }
 
+#if defined(CONFIG_OMP_TBB)
+size_t readText(const char *fp, _hash_map<string, uint32_t> &word_count) {
+  uint64_t total = 0;
+  size_t sz = 0;
+
+  if (string(fp).compare("-") == 0) {
+    fprintf(stderr, "Not implemented\n");
+    exit(EXIT_FAILURE);
+  }
+  else {
+    int fd = safeOpen(fp, O_RDONLY);
+
+    struct stat s;
+    fstat(fd, &s);
+    fprintf(stderr, "Loading vocabulary from %s ...\n", fp);
+
+    size_t size = s.st_size;
+    char *f = (char *)mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+
+
+    vector<size_t> boundary = get_boundary(f, size, kThreads);
+//    for (int i = 0; i < kThreads; i++) {
+//      cout << "start of " << i << "th thread " << boundary[i] << endl;
+//    }
+    #pragma omp parallel reduction(+: total)
+    {
+      size_t id = omp_get_thread_num();
+      string cur_word;
+
+      for (size_t i = boundary[id]; i < boundary[id + 1]; i++) {
+        if (f[i] == ' ' || f[i] == '\n') {
+          if (cur_word.size() == 0)
+            continue;
+          // end of word
+          auto it = word_count.find(cur_word);
+          int count = it != word_count.end() ? it->second : 0;
+          word_count[cur_word] = count + 1;
+          total++;
+          cur_word.clear();
+        } else {
+          cur_word.push_back(f[i]);
+        }
+      }
+    }
+
+    sz = size;
+  }
+  fprintf(stderr, "Read %lu words (%lu unique) from text file.\n", total,
+          word_count.size());
+  return sz;
+}
+
+#else /* !CONFIG_OMP_TBB */
+
 size_t readText(const char *fp, _hash_map<string, uint32_t> &word_count) {
   string cur;
   uint64_t total = 0;
@@ -117,26 +171,9 @@ size_t readText(const char *fp, _hash_map<string, uint32_t> &word_count) {
     size_t size = s.st_size;
     char *f = (char *)mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
 
-
-#if defined(CONFIG_OMP_TBB)
-    vector<size_t> boundary = get_boundary(f, size, kThreads);
-//    for (int i = 0; i < kThreads; i++) {
-//      cout << "start of " << i << "th thread " << boundary[i] << endl;
-//    }
-    #pragma omp parallel reduction(+: total)
-    {
-      size_t id = omp_get_thread_num();
-      string local_cur;
-
-      for (size_t i = boundary[id]; i < boundary[id + 1]; i++) {
-        deal_with_char(f[i], local_cur);
-      }
-    }
-#else
     for (size_t i = 0; i < size; i++) {
       deal_with_char(f[i], cur);
     }
-#endif
 
     sz = size;
   }
@@ -144,6 +181,7 @@ size_t readText(const char *fp, _hash_map<string, uint32_t> &word_count) {
           word_count.size());
   return sz;
 }
+#endif
 
 #if defined(CONFIG_MPI)
 
@@ -490,7 +528,10 @@ void tokenize(const _hash_map<string, uint32_t> &word_count,
 
 void tokenize_str(const _hash_map<string, uint32_t> &word_count,
                   _hash_map<string, vector<string>> &words) {
-
+#ifdef CONFIG_OMP_TBB
+//  #pragma omp parallel for
+#else
+#endif
   for (auto &x : word_count) {
     auto &word = x.first;
     words[word] = vector<string>();
