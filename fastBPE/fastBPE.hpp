@@ -80,9 +80,8 @@ vector<size_t> get_boundary(char *f, size_t size, size_t nr_threads)
   return boundary;
 }
 
-#if defined(CONFIG_OMP_TBB)
-size_t readText(const char *fp, _hash_map<string, uint32_t> &word_count) {
-  uint64_t total = 0;
+size_t readText_split(const char *fp, vector<_hash_map<string, uint32_t>> &all_word_count) {
+  uint64_t total = 0, unique = 0;
   size_t sz = 0;
 
   if (string(fp).compare("-") == 0) {
@@ -104,10 +103,11 @@ size_t readText(const char *fp, _hash_map<string, uint32_t> &word_count) {
 //    for (int i = 0; i < kThreads; i++) {
 //      cout << "start of " << i << "th thread " << boundary[i] << endl;
 //    }
-    #pragma omp parallel reduction(+: total)
+    #pragma omp parallel reduction(+: total, unique)
     {
       size_t id = omp_get_thread_num();
       string cur_word;
+      _hash_map<string, uint32_t> &word_count = all_word_count[id];
 
       for (size_t i = boundary[id]; i < boundary[id + 1]; i++) {
         if (f[i] == ' ' || f[i] == '\n') {
@@ -123,16 +123,15 @@ size_t readText(const char *fp, _hash_map<string, uint32_t> &word_count) {
           cur_word.push_back(f[i]);
         }
       }
+      unique += word_count.size();
     }
 
     sz = size;
   }
-  fprintf(stderr, "Read %lu words (%lu unique) from text file.\n", total,
-          word_count.size());
+
+  fprintf(stderr, "Read %lu words (%lu unique) from text file.\n", total, unique);
   return sz;
 }
-
-#else /* !CONFIG_OMP_TBB */
 
 size_t readText(const char *fp, _hash_map<string, uint32_t> &word_count) {
   string cur;
@@ -181,30 +180,12 @@ size_t readText(const char *fp, _hash_map<string, uint32_t> &word_count) {
           word_count.size());
   return sz;
 }
-#endif
-
-#if CONFIG_OMP
 
 std::pair<size_t, uint64_t> output_or_count(
-  _hash_map<string, string> &bpe, size_t size, char *f, vector<char> *allbuf
+  vector<_hash_map<string, string>> &bpe, size_t size, char *f, vector<char> *allbuf
 ) {
   uint64_t sz = 0, total = 0;
-  vector<size_t> boundary(kThreads + 1);
-
-  boundary[0] = 0;
-  boundary[kThreads] = size;
-  for (size_t i = 1; i < kThreads; i++) {
-    size_t start = (size / kThreads) * i;
-    while (f[start] != ' ' && f[start] != '\n') {
-      start++;
-      if (start >= size) {
-        fprintf(stderr, "error dividing works for output for #%zu, reaching the end\n", i);
-	start = size;
-	break;
-      }
-    }
-    boundary[i] = start + 1 >= size ? size : start + 1;
-  }
+  vector<size_t> boundary = get_boundary(f, size, kThreads);
 
   #pragma omp parallel reduction(+:sz, total)
   {
@@ -221,8 +202,8 @@ std::pair<size_t, uint64_t> output_or_count(
           continue;
         }
         // end of word : write bpe to output
-        auto it = bpe.find(cur_word);
-        assert(it != bpe.end());
+        auto it = bpe[id].find(cur_word);
+        assert(it != bpe[id].end());
         for (auto x : it->second) {
           buf->push_back(x);
 	  sz++;
@@ -242,7 +223,7 @@ std::pair<size_t, uint64_t> output_or_count(
 }
 
 void outputText(const char *fpo, const char *fp,
-                _hash_map<string, string> &bpe) {
+                vector<_hash_map<string, string>> &bpe) {
 
   int fd = safeOpen(fp, O_RDONLY);
   auto fdOut = safeOpen(fpo, O_RDWR | O_CREAT | O_TRUNC, 0666);
@@ -288,80 +269,6 @@ void outputText(const char *fpo, const char *fp,
   close(fdOut);
   close(fd);
 }
-
-#else /* !CONFIG_OMP */
-
-std::pair<size_t, uint64_t> output_or_count(
-  _hash_map<string, string> &bpe, size_t size, char *f, char *fo
-) {
-  string cur_word;
-  size_t charOut = 0;
-  uint64_t total = 0;
-
-  for (size_t i = 0; i < size; i++) {
-    auto &cur_char = f[i];
-    if (cur_char == ' ' || cur_char == '\n') {
-      if (cur_word.size() == 0) {
-        if (fo != nullptr) fo[charOut] = cur_char;
-        charOut++;
-        continue;
-      }
-      // end of word : write bpe to output
-      auto it = bpe.find(cur_word);
-      assert(it != bpe.end());
-      for (auto x : it->second) {
-        if (fo != nullptr) fo[charOut] = x;
-        charOut++;
-      }
-      if (fo != nullptr) fo[charOut] = cur_char;
-      charOut++;
-
-      total++;
-      cur_word.clear();
-    } else {
-      cur_word.push_back(cur_char);
-    }
-  }
-  return std::make_pair(charOut, total);
-}
-
-void outputText(const char *fpo, const char *fp,
-                _hash_map<string, string> &bpe) {
-
-  int fd = safeOpen(fp, O_RDONLY);
-  auto fdOut = safeOpen(fpo, O_RDWR | O_CREAT | O_TRUNC, 0666);
-
-  struct stat s;
-  fstat(fd, &s);
-
-  fprintf(stderr, "Applying BPE to %s ...\n", fp);
-  auto size = s.st_size;
-  char *f = (char *)mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
-
-  auto p = output_or_count(bpe, size, f, nullptr);
-  size_t out_size = p.first;
-
-  if (ftruncate(fdOut, out_size) < 0) {
-    fprintf(stderr, "Couldn't truncate output file %s to size %lu\n", fpo,
-            out_size);
-    exit(EXIT_FAILURE);
-  }
-
-
-  char *fo = (char *)mmap(NULL, out_size, PROT_WRITE, MAP_SHARED, fdOut, 0);
-  if (fo == MAP_FAILED) {
-    fprintf(stderr, "Output memory map failed : %d.\n", errno);
-    exit(EXIT_FAILURE);
-  }
-  p = output_or_count(bpe, size, f, fo);
-  fprintf(stderr, "Modified %lu words from text file.\n", p.second);
-  munmap(fo, out_size);
-  munmap(f, size);
-  close(fdOut);
-  close(fd);
-}
-
-#endif /* CONFIG_OMP */
 
 struct pair_hash {
   template <class T1, class T2> size_t operator()(const pair<T1, T2> &p) const {
@@ -411,43 +318,6 @@ void tokenize(const _hash_map<string, uint32_t> &word_count,
   }
 }
 
-#ifdef CONFIG_OMP_TBB
-void tokenize_str(const _hash_map<string, uint32_t> &word_count,
-                  _hash_map<string, vector<string>> &words) {
-
-  vector<pair<string, uint32_t>> kvs;
-  kvs.reserve(word_count.size());
-  for (auto &kv : word_count) {
-    kvs.emplace_back(kv);
-  }
-
-  #pragma omp parallel for
-  for (int i = 0; i < kvs.size(); i++) {
-    auto &x = kvs[i];
-    auto &word = x.first;
-    words[word] = vector<string>();
-
-    int pos = 0, realLength = 0;
-    int lastStart = 0;
-    while (word[pos]) {
-      bool newChar = (word[pos] & 0xc0) != 0x80; // not a continuation byte
-      realLength += newChar;
-      // new token
-      if (newChar && pos > 0) {
-        auto new_token = word.substr(lastStart, pos - lastStart);
-        words[word].push_back(new_token);
-        lastStart = pos;
-      }
-      pos++;
-    }
-    auto new_token = word.substr(lastStart, string::npos) + kEndWord;
-    // don't need to synchronize as each word is unique
-    words[word].push_back(new_token);
-  }
-}
-
-#else
-
 void tokenize_str(const _hash_map<string, uint32_t> &word_count,
                   _hash_map<string, vector<string>> &words) {
   for (auto &x : word_count) {
@@ -471,7 +341,6 @@ void tokenize_str(const _hash_map<string, uint32_t> &word_count,
     words[word].push_back(new_token);
   }
 }
-#endif
 
 using tp = pair<uint32_t, uint32_t>;
 using tps = pair<string, string>;
@@ -994,49 +863,19 @@ string process_bpe(vector<string> &subwords,
 
 #ifdef CONFIG_MPI
 
-unsigned long mpi_readTexts(string inputFile, _hash_map<string, uint32_t>&word_count, bool merge)
+unsigned long mpi_readTexts(string inputFile, vector<_hash_map<string, uint32_t>>&word_count, bool merge)
 {
   vector<_hash_map<string, uint32_t>> global_word_count;
   _hash_map<string, uint32_t> local_word_count;
   mpi::communicator world;
   unsigned long sz, sum;
 
-  if (!merge) {
-    sz = readText((inputFile + "." + to_string(world.rank())).c_str(), word_count);
-    reduce(world, sz, sum, std::plus<unsigned long>(), 0);
-    return sum;
+  if (merge) {
+    fprintf(stderr, "not supported\n");
+    return 0;
   }
 
-  sz = readText((inputFile + "." + to_string(world.rank())).c_str(), local_word_count);
-
-#ifdef CONFIG_OMP_TBB
-  vector<pair<string, uint32_t>> kvs;
-  vector<vector<pair<string, uint32_t>>> all_kvs;
-  kvs.reserve(local_word_count.size());
-  for (auto &x: local_word_count) {
-    kvs.emplace_back(x.first, x.second);
-  }
-
-  all_gather(world, kvs, all_kvs);
-
-  #pragma omp parallel for
-  for (int i = 0; i < world.size(); i++) {
-    // should serialize it for better parallelization
-    for (auto &x: all_kvs[i]) {
-      word_count[x.first] += x.second;
-    }
-  }
-
-#else /* !CONFIG_OMP_TBB */
-
-  all_gather(world, local_word_count, global_word_count);
-
-  for (int i = 0; i < world.size(); i++) {
-    for (auto &x: global_word_count[i]) {
-      word_count[x.first] += x.second;
-    }
-  }
-#endif /* CONFIG_OMP_TBB */
+  sz = readText_split((inputFile + "." + to_string(world.rank())).c_str(), word_count);
   reduce(world, sz, sum, std::plus<unsigned long>(), 0);
   return sum;
 }
@@ -1048,7 +887,6 @@ void applybpe(const char *outputFile, const char *inputFile,
   // read vocabulary (to which we want to limit the output file)
   auto start = chrono::steady_clock::now();
   unsigned long sz;
-#ifdef CONFIG_OMP
   int nr_threads;
   #pragma omp parallel
   {
@@ -1056,9 +894,7 @@ void applybpe(const char *outputFile, const char *inputFile,
       nr_threads = omp_get_num_threads();
     }
   }
-
   kThreads = nr_threads;
-#endif
 
   _hash_map<string, uint32_t> vocab;
   if (strcmp(vocabPath, "") != 0) {
@@ -1071,92 +907,32 @@ void applybpe(const char *outputFile, const char *inputFile,
   readCodes(codesPath, codes, reversed_codes);
 
   // read input file words
-  _hash_map<string, uint32_t> word_count;
+  vector<_hash_map<string, uint32_t>> word_count(nr_threads);
 #ifdef CONFIG_MPI
   sz = mpi_readTexts(inputFile, word_count, false);
 #else /* !CONFIG_MPI */
-  sz = readText(inputFile, word_count);
+  sz = readText_split(inputFile, word_count);
 #endif /* CONFIG_MPI */
 
-  // tokenize
-  _hash_map<string, vector<string>> bpeTok;
-  tokenize_str(word_count, bpeTok);
+  vector<_hash_map<string, string>> final_bpe(nr_threads);
+  #pragma omp parallel
+  {
+    int id = omp_get_thread_num();
+    _hash_map<string, string> &bpe = final_bpe[id];
+    // tokenize
+    _hash_map<string, vector<string>> bpeTok;
+    tokenize_str(word_count[id], bpeTok);
 
-  vector<pair<string, vector<string>>> bpeTokVec;
-  for (auto x : bpeTok) {
-    bpeTokVec.push_back(x);
-  }
+    vector<pair<string, vector<string>>> bpeTokVec;
+    for (auto x : bpeTok) {
+      bpeTokVec.push_back(x);
+    }
 
-  // apply BPE codes to each word
-
-#ifndef CONFIG_OMP
-  cout << "Spawning " << kThreads << "threads" << endl;
-  _hash_map<string, string> bpe[kThreads];
-  vector<thread> threads;
-  for (size_t i = 0; i < kThreads; i++) {
-    threads.emplace_back(
-      [&](size_t this_thread) {
-        for (size_t w = this_thread; w < bpeTokVec.size(); w += kThreads) {
-          auto &x = bpeTokVec[w];
-          bpe[this_thread][x.first] = process_bpe(x.second, codes, reversed_codes, vocab);
-        }
-      },
-      i
-    );
-  }
-
-  _hash_map<string, string> final_bpe;
-  for (size_t i = 0; i < kThreads; i++) {
-    threads[i].join();
-    for (auto x : bpe[i]) {
-      final_bpe[x.first] = x.second;
+    for (size_t w = 0; w < bpeTokVec.size(); w++) {
+      auto &x = bpeTokVec[w];
+      bpe[x.first] = process_bpe(x.second, codes, reversed_codes, vocab);
     }
   }
-#else /* CONFIG_OMP  */
-#if defined(CONFIG_OMP_CRITICAL)
-  cout << "omp critical region, number of threads = " << nr_threads << endl;
-  _hash_map<string, string> final_bpe;
-
-  #pragma omp parallel for
-  for (size_t w = 0; w < bpeTokVec.size(); w++) {
-    auto &x = bpeTokVec[w];
-    auto str = process_bpe(x.second, codes, reversed_codes, vocab);
-    #pragma omp critical
-    {
-      final_bpe[x.first] = str;
-    }
-  }
-#elif defined(CONFIG_OMP_SINGLE_THREADED_MERGE)
-  cout << "omp single thread merge, number of threads = " << nr_threads << endl;
-  _hash_map<string, string> bpe[nr_threads];
-
-  #pragma omp parallel for
-  for (size_t w = 0; w < bpeTokVec.size(); w++) {
-    auto &x = bpeTokVec[w];
-    auto str = process_bpe(x.second, codes, reversed_codes, vocab);
-    bpe[omp_get_thread_num()][x.first] = str;
-  }
-
-  _hash_map<string, string> final_bpe;
-  for (size_t i = 0; i < nr_threads; i++) {
-    for (auto x : bpe[i]) {
-      final_bpe[x.first] = x.second;
-    }
-  }
-#elif defined(CONFIG_OMP_TBB)
-  cout << "omp+tbb, number of threads = " << nr_threads << endl;
-  tbb::concurrent_unordered_map<string, string> final_bpe;
-
-  #pragma omp parallel for
-  for (size_t w = 0; w < bpeTokVec.size(); w++) {
-    auto &x = bpeTokVec[w];
-    auto str = process_bpe(x.second, codes, reversed_codes, vocab);
-    final_bpe[x.first] = str;
-  }
-#else
-#error "Define a parallel method"
-#endif
-#endif
 
   // output
 #ifdef CONFIG_MPI
