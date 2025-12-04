@@ -441,6 +441,7 @@ void tokenize_str(const _hash_map<string, uint32_t> &word_count,
       pos++;
     }
     auto new_token = word.substr(lastStart, string::npos) + kEndWord;
+    // don't need to synchronize as each word is unique
     words[word].push_back(new_token);
   }
 }
@@ -993,12 +994,18 @@ string process_bpe(vector<string> &subwords,
 
 #ifdef CONFIG_MPI
 
-unsigned long mpi_readTexts(string inputFile, _hash_map<string, uint32_t>&word_count)
+unsigned long mpi_readTexts(string inputFile, _hash_map<string, uint32_t>&word_count, bool merge)
 {
   vector<_hash_map<string, uint32_t>> global_word_count;
   _hash_map<string, uint32_t> local_word_count;
   mpi::communicator world;
   unsigned long sz, sum;
+
+  if (!merge) {
+    sz = readText((inputFile + "." + to_string(world.rank())).c_str(), word_count);
+    reduce(world, sz, sum, std::plus<unsigned long>(), 0);
+    return sum;
+  }
 
   sz = readText((inputFile + "." + to_string(world.rank())).c_str(), local_word_count);
 
@@ -1066,7 +1073,7 @@ void applybpe(const char *outputFile, const char *inputFile,
   // read input file words
   _hash_map<string, uint32_t> word_count;
 #ifdef CONFIG_MPI
-  sz = mpi_readTexts(inputFile, word_count);
+  sz = mpi_readTexts(inputFile, word_count, false);
 #else /* !CONFIG_MPI */
   sz = readText(inputFile, word_count);
 #endif /* CONFIG_MPI */
