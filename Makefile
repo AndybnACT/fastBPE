@@ -1,6 +1,6 @@
 
 
-all: fast.mpi fast.mpi.stm fast.omp_tbb fast.omp_stm fast.omp_crt fast.orig
+all: fast.mpi.tbb fast.mpi.stm fast.omp_tbb fast.omp_stm fast.omp_crt fast.orig
 
 fast.orig: fastBPE/main.cc fastBPE/fastBPE.hpp
 	CC -std=c++11 -pthread -O3 fastBPE/main.cc -IfastBPE -o fast.orig
@@ -22,7 +22,7 @@ fast.mpi.tbb: fastBPE/main.cc fastBPE/fastBPE.hpp
 		-L$(BOOST_BASE)/lib -I$(BOOST_BASE) \
 		-lboost_mpi -lboost_serialization \
 		-lboost_container -lboost_graph \
-		-o fast.mpi
+		-o fast.mpi.tbb
 
 fast.mpi.stm: fastBPE/main.cc fastBPE/fastBPE.hpp
 	CC -O3 -std=c++11  fastBPE/main.cc -fopenmp -IfastBPE \
@@ -31,7 +31,7 @@ fast.mpi.stm: fastBPE/main.cc fastBPE/fastBPE.hpp
 		-L$(BOOST_BASE)/lib -I$(BOOST_BASE) \
 		-lboost_mpi -lboost_serialization \
 		-lboost_container -lboost_graph \
-		-o fast.mpi
+		-o fast.mpi.stm
 
 clean:
 	rm fast.*
