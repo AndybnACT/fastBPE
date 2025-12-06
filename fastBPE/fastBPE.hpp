@@ -935,16 +935,18 @@ void applybpe(const char *outputFile, const char *inputFile,
     auto end = chrono::steady_clock::now();
     auto duration = chrono::duration_cast<std::chrono::microseconds>(end - start);
     double bw = (double) sz / (double) duration.count() * 1e6f;
-    cout << "Time spent = " << duration.count() << "ms" << endl;
-    cout << "Bandwidth = " << bw << " B/sec, " << bw / pow(2,20) << "MB/sec" << endl;
+    cout << "Ranks = " << world.size() << ", Threads = " << nr_threads;
+    cout << ", Time spent = " << duration.count() << " ms, ";
+    cout << "Bandwidth = " << bw << " B/sec, " << bw / pow(2,20) << " MB/sec" << endl;
   }
 #else /* !CONFIG_MPI  */
   outputText(outputFile, inputFile, final_bpe);
   auto end = chrono::steady_clock::now();
   auto duration = chrono::duration_cast<std::chrono::microseconds>(end - start);
   double bw = (double) sz / (double) duration.count() * 1e6f;
-  cout << "Time spent = " << duration.count() << "ms" << endl;
-  cout << "Bandwidth = " << bw << " B/sec, " << bw / pow(2,20) << "MB/sec" << endl;
+  cout << "Ranks = 1" << ", Threads = " << nr_threads;
+  cout << ", Time spent = " << duration.count() << " ms, " ;
+  cout << "Bandwidth = " << bw << " B/sec, " << bw / pow(2,20) << " MB/sec" << endl;
 #endif /* CONFIG_MPI  */
 }
 
