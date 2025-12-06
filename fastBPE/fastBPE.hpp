@@ -97,6 +97,15 @@ size_t readText_split(const char *fp, vector<_hash_map<string, uint32_t>> &all_w
 
     size_t size = s.st_size;
     char *f = (char *)mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    sz = size;
+
+#ifdef CONFIG_MPI
+    mpi::communicator world;
+
+    vector<size_t> rank_boundary = get_boundary(f, size, world.size());
+    size = rank_boundary[world.rank() + 1] - rank_boundary[world.rank()];
+    f += rank_boundary[world.rank()];
+#endif /* CONFIG_MPI  */
 
 
     vector<size_t> boundary = get_boundary(f, size, kThreads);
@@ -124,8 +133,6 @@ size_t readText_split(const char *fp, vector<_hash_map<string, uint32_t>> &all_w
         }
       }
     }
-
-    sz = size;
   }
 
   fprintf(stderr, "Read %lu words from text file.\n", total);
@@ -236,6 +243,14 @@ void outputText(const char *fpo, const char *fp,
   vector<char> allbuf[kThreads];
   vector<size_t> off(kThreads);
 
+#ifdef CONFIG_MPI
+    mpi::communicator world;
+
+    vector<size_t> rank_boundary = get_boundary(f, size, world.size());
+    size = rank_boundary[world.rank() + 1] - rank_boundary[world.rank()];
+    f += rank_boundary[world.rank()];
+#endif /* CONFIG_MPI  */
+
   auto p = output_or_count(bpe, size, f, allbuf);
   size_t out_size = p.first;
 
@@ -264,7 +279,7 @@ void outputText(const char *fpo, const char *fp,
 
   fprintf(stderr, "Modified %lu words from text file.\n", p.second);
   munmap(fo, out_size);
-  munmap(f, size);
+  munmap(f, s.st_size);
   close(fdOut);
   close(fd);
 }
@@ -860,27 +875,6 @@ string process_bpe(vector<string> &subwords,
   );
 }
 
-#ifdef CONFIG_MPI
-
-unsigned long mpi_readTexts(string inputFile, vector<_hash_map<string, uint32_t>>&word_count, bool merge)
-{
-  vector<_hash_map<string, uint32_t>> global_word_count;
-  _hash_map<string, uint32_t> local_word_count;
-  mpi::communicator world;
-  unsigned long sz, sum;
-
-  if (merge) {
-    fprintf(stderr, "not supported\n");
-    return 0;
-  }
-
-  sz = readText_split((inputFile + "." + to_string(world.rank())).c_str(), word_count);
-  reduce(world, sz, sum, std::plus<unsigned long>(), 0);
-  return sum;
-}
-
-#endif /* CONFIG_MPI */
-
 void applybpe(const char *outputFile, const char *inputFile,
               const char *codesPath, const char *vocabPath) {
   // read vocabulary (to which we want to limit the output file)
@@ -907,11 +901,8 @@ void applybpe(const char *outputFile, const char *inputFile,
 
   // read input file words
   vector<_hash_map<string, uint32_t>> word_count(nr_threads);
-#ifdef CONFIG_MPI
-  sz = mpi_readTexts(inputFile, word_count, false);
-#else /* !CONFIG_MPI */
+
   sz = readText_split(inputFile, word_count);
-#endif /* CONFIG_MPI */
 
   vector<_hash_map<string, string>> final_bpe(nr_threads);
   #pragma omp parallel
@@ -938,7 +929,7 @@ void applybpe(const char *outputFile, const char *inputFile,
   mpi::communicator world;
 
   outputText((string(outputFile) + "." + to_string(world.rank())).c_str(),
-             (string(inputFile) + "." + to_string(world.rank())).c_str(), final_bpe);
+             inputFile, final_bpe);
   world.barrier();
   if (world.rank() == 0) {
     auto end = chrono::steady_clock::now();
