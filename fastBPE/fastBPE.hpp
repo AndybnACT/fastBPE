@@ -81,7 +81,7 @@ vector<size_t> get_boundary(char *f, size_t size, size_t nr_threads)
 }
 
 size_t readText_split(const char *fp, vector<_hash_map<string, uint32_t>> &all_word_count) {
-  uint64_t total = 0, unique = 0;
+  uint64_t total = 0;
   size_t sz = 0;
 
   if (string(fp).compare("-") == 0) {
@@ -103,7 +103,7 @@ size_t readText_split(const char *fp, vector<_hash_map<string, uint32_t>> &all_w
 //    for (int i = 0; i < kThreads; i++) {
 //      cout << "start of " << i << "th thread " << boundary[i] << endl;
 //    }
-    #pragma omp parallel reduction(+: total, unique)
+    #pragma omp parallel reduction(+: total)
     {
       size_t id = omp_get_thread_num();
       string cur_word;
@@ -123,13 +123,12 @@ size_t readText_split(const char *fp, vector<_hash_map<string, uint32_t>> &all_w
           cur_word.push_back(f[i]);
         }
       }
-      unique += word_count.size();
     }
 
     sz = size;
   }
 
-  fprintf(stderr, "Read %lu words (%lu unique) from text file.\n", total, unique);
+  fprintf(stderr, "Read %lu words from text file.\n", total);
   return sz;
 }
 
