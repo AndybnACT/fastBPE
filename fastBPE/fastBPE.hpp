@@ -272,7 +272,7 @@ void outputText(const char *fpo, const char *fp,
     exit(EXIT_FAILURE);
   }
 
-//  #pragma omp parallel for // not helping, should avoid data movement
+#pragma omp parallel for
   for (int i = 0; i < kThreads; i++) {
     memcpy(fo+off[i], allbuf[i].data(), allbuf[i].size());
   }
