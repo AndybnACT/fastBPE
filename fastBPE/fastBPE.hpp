@@ -187,8 +187,45 @@ size_t readText(const char *fp, _hash_map<string, uint32_t> &word_count) {
   return sz;
 }
 
+std::pair<size_t, uint64_t> count_off(
+  vector<_hash_map<string, string>> &bpe, size_t size, char *f, vector<size_t> &allbuf
+) {
+  uint64_t sz = 0, total = 0;
+  vector<size_t> boundary = get_boundary(f, size, kThreads);
+
+  #pragma omp parallel reduction(+:sz, total)
+  {
+    string cur_word;
+    size_t id = omp_get_thread_num();;
+    allbuf[id] = 0;
+
+    for (size_t i = boundary[id]; i < boundary[id + 1]; i++) {
+      auto &cur_char = f[i];
+      if (cur_char == ' ' || cur_char == '\n') {
+        if (cur_word.size() == 0) {
+          allbuf[id]++;
+	  sz++;
+          continue;
+        }
+        // end of word : write bpe to output
+        auto it = bpe[id].find(cur_word);
+        assert(it != bpe[id].end());
+	sz += it->second.size() + 1;
+	allbuf[id] += it->second.size() + 1;
+
+        total++;
+        cur_word.clear();
+      } else {
+        cur_word.push_back(cur_char);
+      }
+    }
+  }
+
+  return std::make_pair(sz, total);
+}
+
 std::pair<size_t, uint64_t> output_or_count(
-  vector<_hash_map<string, string>> &bpe, size_t size, char *f, vector<char> *allbuf
+  vector<_hash_map<string, string>> &bpe, size_t size, char *f, char *fo, vector<size_t> &offs
 ) {
   uint64_t sz = 0, total = 0;
   vector<size_t> boundary = get_boundary(f, size, kThreads);
@@ -197,13 +234,14 @@ std::pair<size_t, uint64_t> output_or_count(
   {
     string cur_word;
     size_t id = omp_get_thread_num();
-    vector<char> *buf = &allbuf[id];
+    char *out = id == 0 ? fo : fo + offs[id - 1];
 
     for (size_t i = boundary[id]; i < boundary[id + 1]; i++) {
       auto &cur_char = f[i];
       if (cur_char == ' ' || cur_char == '\n') {
         if (cur_word.size() == 0) {
-          buf->push_back(cur_char);
+          *out = cur_char;
+	  out++;
 	  sz++;
           continue;
         }
@@ -211,10 +249,12 @@ std::pair<size_t, uint64_t> output_or_count(
         auto it = bpe[id].find(cur_word);
         assert(it != bpe[id].end());
         for (auto x : it->second) {
-          buf->push_back(x);
+          *out = x;
+	  out++;
 	  sz++;
         }
-        buf->push_back(cur_char);
+        *out = cur_char;
+	out++;
 	sz++;
 
         total++;
@@ -250,8 +290,7 @@ void outputText(const char *fpo, const char *fp,
     size = rank_boundary[world.rank() + 1] - rank_boundary[world.rank()];
     f += rank_boundary[world.rank()];
 #endif /* CONFIG_MPI  */
-
-  auto p = output_or_count(bpe, size, f, allbuf);
+  auto p = count_off(bpe, size, f, off);
   size_t out_size = p.first;
 
   if (ftruncate(fdOut, out_size) < 0) {
@@ -260,22 +299,16 @@ void outputText(const char *fpo, const char *fp,
     exit(EXIT_FAILURE);
   }
 
-  off[0] = 0;
-  for (int i = 1; i < kThreads; i++) {
-    off[i] = allbuf[i - 1].size() + off[i - 1];
-  }
-
-
   char *fo = (char *)mmap(NULL, out_size, PROT_WRITE, MAP_SHARED, fdOut, 0);
   if (fo == MAP_FAILED) {
     fprintf(stderr, "Output memory map failed : %d.\n", errno);
     exit(EXIT_FAILURE);
   }
 
-#pragma omp parallel for
-  for (int i = 0; i < kThreads; i++) {
-    memcpy(fo+off[i], allbuf[i].data(), allbuf[i].size());
+  for (int i = 1; i < kThreads; i++) {
+    off[i] = off[i] + off[i - 1];
   }
+  output_or_count(bpe, size, f, fo, off);
 
   fprintf(stderr, "Modified %lu words from text file.\n", p.second);
   munmap(fo, out_size);
